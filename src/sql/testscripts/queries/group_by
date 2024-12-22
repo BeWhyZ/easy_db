@@ -1,0 +1,246 @@
+# Tests GROUP BY clauses. See "aggregate" for aggregate function tests.
+
+> CREATE TABLE test ( \
+    id INT PRIMARY KEY, \
+    "group" STRING, \
+    "bool" BOOLEAN, \
+    "int" INTEGER, \
+    "float" FLOAT, \
+    "string" STRING \
+)
+> INSERT INTO test VALUES (0, NULL,   NULL, NULL,   NULL,      NULL)
+> INSERT INTO test VALUES (1, 'a',    TRUE,   -1,   3.14,      '')
+> INSERT INTO test VALUES (2, 'b',    FALSE,  0,    NAN,       'abc')
+> INSERT INTO test VALUES (3, 'a',    TRUE,   3,    -0.0,      'AB')
+> INSERT INTO test VALUES (4, 'b',    TRUE,   42,   INFINITY,  '👋')
+> INSERT INTO test VALUES (5, 'a',    FALSE,  7,    NAN,       '')
+> INSERT INTO test VALUES (6, 'b',    FALSE,  -1,   0.0,       'abc')
+
+> CREATE TABLE other (id INT PRIMARY KEY, value STRING)
+> INSERT INTO other VALUES (1, 'a'), (2, 'b')
+---
+ok
+
+# Grouping with no input rows yields empty result.
+[plan]> SELECT COUNT(id), MIN(id), MAX(id), SUM(id), AVG(id) FROM test WHERE FALSE GROUP BY id
+---
+Projection: #1, #2, #3, #4, #5
+└─ Aggregate: test.id, count(test.id), min(test.id), max(test.id), sum(test.id), avg(test.id)
+   └─ Nothing
+
+# Simple GROUP BY, including NULL group.
+[plan]> SELECT "group", COUNT(*) FROM test GROUP BY "group"
+---
+Aggregate: test.group, count(TRUE)
+└─ Scan: test
+NULL, 1
+'a', 3
+'b', 3
+
+[plan]> SELECT "group", COUNT(*), MIN("bool"), MAX("string"), SUM("int"), AVG("float") \
+    FROM test GROUP BY "group"
+---
+Aggregate: test.group, count(TRUE), min(test.bool), max(test.string), sum(test.int), avg(test.float)
+└─ Scan: test
+NULL, 1, NULL, NULL, NULL, NULL
+'a', 3, FALSE, 'AB', 9, NaN
+'b', 3, FALSE, '👋', 41, NaN
+
+# GROUP BY works on booleans.
+[plan]> SELECT "bool", COUNT(*) FROM test GROUP BY "bool"
+---
+Aggregate: test.bool, count(TRUE)
+└─ Scan: test
+NULL, 1
+FALSE, 3
+TRUE, 3
+
+# GROUP BY works on integers.
+[plan]> SELECT "int", COUNT(*) FROM test GROUP BY "int"
+---
+Aggregate: test.int, count(TRUE)
+└─ Scan: test
+NULL, 1
+-1, 2
+0, 1
+3, 1
+7, 1
+42, 1
+
+# GROUP BY works with floats, including a NAN group and -0.0 and 0.0 being equal.
+[plan]> SELECT "float", COUNT(*) FROM test GROUP BY "float"
+---
+Aggregate: test.float, count(TRUE)
+└─ Scan: test
+NULL, 1
+0.0, 2
+3.14, 1
+inf, 1
+NaN, 2
+
+# GROUP BY works on strings.
+[plan]> SELECT "string", COUNT(*) FROM test GROUP BY "string"
+---
+Aggregate: test.string, count(TRUE)
+└─ Scan: test
+NULL, 1
+'', 2
+'AB', 1
+'abc', 2
+'👋', 1
+
+# GROUP BY works even if the group column isn't in the result.
+[plan]> SELECT COUNT(*) FROM test GROUP BY "group"
+---
+Projection: #1
+└─ Aggregate: test.group, count(TRUE)
+   └─ Scan: test
+1
+3
+3
+
+# GROUP BY works when there is no aggregate function.
+[plan]> SELECT "group" FROM test GROUP BY "group"
+---
+Aggregate: test.group
+└─ Scan: test
+NULL
+'a'
+'b'
+
+# GROUP BY does not work with SELECT aliases (also the case in e.g. SQL server).
+!> SELECT "group" AS g, COUNT(*) FROM test GROUP BY g
+---
+Error: invalid input: unknown column g
+
+[plan]> SELECT "group", COUNT(*) FROM test AS t GROUP BY t."group"
+---
+Aggregate: t.group, count(TRUE)
+└─ Scan: test as t
+NULL, 1
+'a', 3
+'b', 3
+
+!> SELECT "group", COUNT(*) FROM test AS t GROUP BY test."group"
+---
+Error: invalid input: unknown table test
+
+# It errors when there is a non-group column.
+!> SELECT "group", id FROM test GROUP BY "group"
+---
+Error: invalid input: column id must be used in an aggregate or GROUP BY expression
+
+# It errors on unknown tables and columns.
+!> SELECT COUNT(*) FROM test GROUP BY unknown
+!> SELECT COUNT(*) FROM test GROUP BY unknown.id
+---
+Error: invalid input: unknown column unknown
+Error: invalid input: unknown table unknown
+
+# GROUP BY can be arbitrary expressions.
+[plan]> SELECT COUNT(*) FROM test GROUP BY 1
+---
+Projection: #1
+└─ Aggregate: 1, count(TRUE)
+   └─ Scan: test
+7
+
+[plan]> SELECT COUNT(*) FROM test GROUP BY id % 2
+---
+Projection: #1
+└─ Aggregate: test.id % 2, count(TRUE)
+   └─ Scan: test
+4
+3
+
+# GROUP BY can use an expression also used in the SELECT.
+[plan]> SELECT id % 2, COUNT(*) FROM test GROUP BY id % 2
+---
+Aggregate: test.id % 2, count(TRUE)
+└─ Scan: test
+0, 4
+1, 3
+
+# Can mix GROUP BY and aggregate expressions in SELECT.
+[plan]> SELECT MAX("int") + id % 2 FROM test GROUP BY id
+---
+Projection: #1 + test.id % 2
+└─ Aggregate: test.id, max(test.int)
+   └─ Scan: test
+NULL
+0
+0
+4
+42
+8
+-1
+
+# GROUP BY can't use an aliased expression.
+!> SELECT id % 2 AS mod, COUNT(*) FROM test GROUP BY mod
+---
+Error: invalid input: unknown column mod
+
+# GROUP BY can't use aggregate functions.
+!> SELECT COUNT(*) FROM test GROUP BY MIN(id)
+---
+Error: invalid input: unknown function min with 1 arguments
+
+# GROUP BY works with multiple groups.
+[plan]> SELECT "group", "bool", COUNT(*) FROM test GROUP BY "group", "bool"
+---
+Aggregate: test.group, test.bool, count(TRUE)
+└─ Scan: test
+NULL, NULL, 1
+'a', FALSE, 1
+'a', TRUE, 2
+'b', FALSE, 2
+'b', TRUE, 1
+
+# Repeated GROUP BY column works.
+[plan]> SELECT "group", "group", "group", COUNT(*) FROM test GROUP BY "group", "group"
+---
+Projection: test.group, test.group, test.group, #1
+└─ Aggregate: test.group, count(TRUE)
+   └─ Scan: test
+NULL, NULL, NULL, 1
+'a', 'a', 'a', 3
+'b', 'b', 'b', 3
+
+# GROUP BY works with joins.
+[plan]> SELECT t.id % 2, COUNT(*) FROM test t JOIN other o ON t.id % 2 = o.id GROUP BY t.id % 2
+---
+Aggregate: t.id % 2, count(TRUE)
+└─ NestedLoopJoin: inner on t.id % 2 = o.id
+   ├─ Scan: test as t
+   └─ Scan: other as o
+1, 3
+
+# SELECT * requires all columns to be in GROUP BY.
+!> SELECT * FROM test GROUP BY id
+---
+Error: invalid input: column test.group must be used in an aggregate or GROUP BY expression
+
+[plan]> SELECT * FROM test GROUP BY id, "group", "bool", "int", "float", "string"
+---
+Aggregate: test.id, test.group, test.bool, test.int, test.float, test.string
+└─ Scan: test
+0, NULL, NULL, NULL, NULL, NULL
+1, 'a', TRUE, -1, 3.14, ''
+2, 'b', FALSE, 0, NaN, 'abc'
+3, 'a', TRUE, 3, 0.0, 'AB'
+4, 'b', TRUE, 42, inf, '👋'
+5, 'a', FALSE, 7, NaN, ''
+6, 'b', FALSE, -1, 0.0, 'abc'
+
+[plan]> SELECT * FROM test GROUP BY "bool", "int", "float", "string", "group", id
+---
+Projection: test.id, test.group, test.bool, test.int, test.float, test.string
+└─ Aggregate: test.bool, test.int, test.float, test.string, test.group, test.id
+   └─ Scan: test
+0, NULL, NULL, NULL, NULL, NULL
+6, 'b', FALSE, -1, 0.0, 'abc'
+2, 'b', FALSE, 0, NaN, 'abc'
+5, 'a', FALSE, 7, NaN, ''
+1, 'a', TRUE, -1, 3.14, ''
+3, 'a', TRUE, 3, 0.0, 'AB'
+4, 'b', TRUE, 42, inf, '👋'

@@ -1,0 +1,33 @@
+# The node ID (must be unique in the cluster), and map of peer IDs and Raft
+# addresses (empty for single node).
+id: 1
+peers: {}
+
+# Addresses to listen for SQL and Raft connections on.
+listen_sql: localhost:9605
+listen_raft: localhost:9705
+
+# The log level. Valid values are DEBUG, INFO, WARN, and ERROR.
+log_level: INFO
+
+# Node data directory. The Raft log is stored in the file "raft", and the SQL
+# database in "sql".
+data_dir: data
+
+# Storage engine to use for the Raft log and SQL database.
+#
+# * bitcask (default): an append-only log-structured store.
+# * memory: an in-memory store using the Rust standard library's BTreeMap.
+storage_raft: bitcask
+storage_sql: bitcask
+
+# Whether to fsync writes to disk. Disabling this yields much better write
+# performance, but may lose data on host crashes and violate Raft guarantees. It
+# only affects Raft log writes (the SQL state machine is never fsynced since it
+# can be reconstructed from the Raft log).
+fsync: true
+
+# The minimum garbage fraction and bytes to trigger Bitcask log compaction on
+# node startup.
+compact_threshold: 0.2
+compact_min_bytes: 1000000
