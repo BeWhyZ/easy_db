@@ -22,9 +22,6 @@ Cargo.lock
 
 # Added by cargo
 
-/target
-
-
 /cluster/toydb*/data
 /data
 /target
