@@ -1,15 +1,17 @@
+use crate::encoding::Value;
 use crate::raft;
 use crate::error::Result;
 use crate::sql;
 
 use crossbeam::channel::{Receiver, Sender};
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use log::{debug, error, info};
 
 
 const RAFT_PEER_CHANNEL_CAPACITY: u16 = 1000;
-
+const RAFT_PEER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1); 
 
 pub struct Server {
     node: raft::Node,
@@ -85,13 +87,56 @@ impl Server {
     /// Accepts new inbound Raft connections from peers and spawns threads
     /// routing inbound messages to the local Raft node.
     fn raft_accept(listener: TcpListener, raft_step_tx: Sender<raft::Envelope>) {
-        todo!();
+        std::thread::scope(move |s| loop {
+            let (socket, peer) = match listener.accept() {
+                Ok((socket, peer)) => (socket, peer),
+                Err(err) => {
+                    error!("Raft peer accept failed {err}");
+                    continue;
+                }
+            };
+            let raft_step_tx = raft_step_tx.clone();
+            s.spawn(move || {
+                debug!("Raft peer {peer} connected");
+                match Self::raft_receive_peer(socket, raft_step_tx) {
+                    Ok(()) => debug!("Raft peer {peer} disconnected"),
+                    Err(err) => error!("Raft peer {peer} error: {err}"),
+                }
+            });
+        });
+    }
+    /// Receives inbound messages from a peer via TCP, and queues them for
+    /// stepping into the Raft node.
+    fn raft_receive_peer(socket: TcpStream, raft_step_tx: Sender<raft::Envelope>) -> Result<()> {
+        let mut socket = std::io::BufReader::new(socket);
+        while let Some(message) = raft::Envelope::maybe_decode_from(&mut socket)? {
+            raft_step_tx.send(message)?;
+        }
+        
+        Ok(())
     }
 
     /// Sends outbound messages to a peer via TCP. Retries indefinitely if the
     /// connection fails.
     fn raft_send_peer(addr: String, raft_peer_rx: Receiver<raft::Envelope>) {
-        todo!();
+        loop {
+            let mut socket = match TcpStream::connect(&addr) {
+                Ok(socket) => socket,
+                Err(err) => {
+                    error!("Failed connecting to Raft peer {addr}: {err}");
+                    std::thread::sleep(RAFT_PEER_RETRY_INTERVAL);
+                    continue;
+                }
+            };
+
+            while let Ok(message) = raft_peer_rx.recv() {
+                if let Err(err) = message.encode_into(&mut socket).and_then(|_| Ok(socket.flush()?)) {
+                    error!("Failed sending to Raft peer {addr}: {err}");
+                    break;
+                }
+            }
+            debug!("Disconnected from Raft peer {addr}");
+        }
     }
 
     /// Routes Raft messages:
