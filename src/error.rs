@@ -48,3 +48,159 @@ impl Error {
         }
     }
 }
+
+#[macro_export]
+macro_rules! errdata {
+    ($($args:tt)*) => {$crate::error::Error::InvaildData(format!($($args)*).into())};
+}
+
+#[macro_export]
+macro_rules! errinput {
+    ($($args:tt)*) => {$crate::error::Error::InvalidInput(format!($($args)*).into())};
+}
+
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+
+impl<T> From<Error> for Result<T> {
+    fn from(e: Error) -> Self {
+        Err(e)
+    }
+}
+
+impl serde::de::Error for Error{
+    fn custom<T>(msg: T) -> Self
+        where
+            T: Display,
+        {
+            Error::InvalidData(msg.to_string())
+        }
+}
+
+impl serde::ser::Error for Error {
+    fn custom<T: Display>(msg: T) -> Self {
+        Error::InvalidData(msg.to_string())
+    }
+}
+
+
+impl From<Box<bincode::ErrorKind>> for Error {
+    fn from(err: Box<bincode::ErrorKind>) -> Self {
+        Error::InvalidData(err.to_string())
+    }
+}
+
+impl From<config::ConfigError> for Error {
+    fn from(err: config::ConfigError) -> Self {
+        Error::InvalidInput(err.to_string())
+    }
+}
+
+impl From<crossbeam::channel::RecvError> for Error {
+    fn from(err: crossbeam::channel::RecvError) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+impl<T> From<crossbeam::channel::SendError<T>> for Error {
+    fn from(err: crossbeam::channel::SendError<T>) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+/// impl crossbeam error for error, RecvError, SendError, TryRecvError, TrySendError
+
+impl From<crossbeam::channel::TryRecvError> for Error {
+    fn from(err: crossbeam::channel::TryRecvError) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+impl<T> From<crossbeam::channel::TrySendError<T>> for Error {
+    fn from(err: crossbeam::channel::TrySendError<T>) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+/// impl hdrhistogram error for Error, CreationError, RecordError, 
+impl From<hdrhistogram::CreationError> for Error {
+    fn from(err: hdrhistogram::CreationError) -> Self {
+        panic!("{err}") // faulty code
+    }
+}
+
+impl From<hdrhistogram::RecordError> for Error {
+    fn from(err: hdrhistogram::RecordError)  -> Self {
+        Error::InvalidInput(err.to_string())
+    }
+}
+
+impl From<log::ParseLevelError> for Error {
+    fn from(err: log::ParseLevelError) -> Self {
+        Error::InvalidInput(err.to_string())
+    }
+}
+
+impl From<log::SetLoggerError> for Error {
+    fn from(err: log::SetLoggerError) -> Self {
+        panic!("{err}") // faulty code
+    }
+}
+
+impl From<regex::Error> for Error {
+    fn from(err: regex::Error) -> Self {
+        panic!("{err}") // faulty code
+    }
+}
+
+impl From<rustyline::error::ReadlineError> for Error {
+    fn from(err: rustyline::error::ReadlineError) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+impl From<std::array::TryFromSliceError> for Error {
+    fn from(err: std::array::TryFromSliceError) -> Self {
+        Error::InvalidData(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::IO(err.to_string())
+    }
+}
+
+impl From<std::num::ParseFloatError> for Error {
+    fn from(err: std::num::ParseFloatError) -> Self {
+        Error::InvalidInput(err.to_string())
+    }
+}
+
+impl From<std::num::ParseIntError> for Error {
+    fn from(err: std::num::ParseIntError) -> Self {
+        Error::InvalidInput(err.to_string())
+    }
+}
+
+impl From<std::num::TryFromIntError> for Error {
+    fn from(err: std::num::TryFromIntError) -> Self {
+        Error::InvalidData(err.to_string())
+    }
+}
+
+impl From<std::string::FromUtf8Error> for Error {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Error::InvalidData(err.to_string())
+    }
+}
+
+impl<T> From<std::sync::PoisonError<T>> for Error {
+    fn from(err: std::sync::PoisonError<T>) -> Self {
+        // This only happens when a different thread panics while holding a
+        // mutex. This should be fatal, so we panic here too.
+        panic!("{err}")
+    }
+}
+
