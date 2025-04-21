@@ -59,7 +59,7 @@ macro_rules! errinput {
     ($($args:tt)*) => {$crate::error::Error::InvalidInput(format!($($args)*).into())};
 }
 
-
+/// A type alias for `Result<T, Error>`. and specify unified error to result 
 pub type Result<T> = std::result::Result<T, Error>;
 
 
@@ -84,9 +84,14 @@ impl serde::ser::Error for Error {
     }
 }
 
+impl From<Box<bincode::error::DecodeError>> for Error {
+    fn from(err: Box<bincode::error::DecodeError>) -> Self {
+        Error::InvalidData(err.to_string())
+    }
+}
 
-impl From<Box<bincode::ErrorKind>> for Error {
-    fn from(err: Box<bincode::ErrorKind>) -> Self {
+impl From<Box<bincode::error::EncodeError>> for Error {
+    fn from(err: Box<bincode::error::EncodeError>) -> Self {
         Error::InvalidData(err.to_string())
     }
 }
