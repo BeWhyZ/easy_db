@@ -1,33 +1,48 @@
 use std::fmt::Display;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+/// toyDB errors.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
+    /// The operation was aborted and must be retried. This typically happens
+    /// with e.g. Raft leader changes. This is used instead of implementing
+    /// complex retry logic and replay protection in Raft.
     Abort,
+    /// Invalid data, typically decoding errors or unexpected internal values.
     InvalidData(String),
+    /// Invalid user input, typically parser or query errors.
     InvalidInput(String),
+    /// An IO error.
     IO(String),
+    /// A write was attempted in a read-only transaction.
     ReadOnly,
+    /// A write transaction conflicted with a different writer and lost. The
+    /// transaction must be retried.
     Serialization,
 }
 
 impl std::error::Error for Error {}
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Error::Abort => write!(f, "abort"),
-            Error::InvalidData(ref msg) => write!(f, "invalid data: {msg}"),
-            Error::InvalidInput(ref msg) => write!(f, "invalid input: {msg}"),
-            Error::IO(ref msg) => write!(f, "io error: {msg}"),
-            Error::ReadOnly => write!(f, "read only"),
-            Error::Serialization => write!(f, "serialization error"),
+            Error::Abort => write!(f, "operation aborted"),
+            Error::InvalidData(msg) => write!(f, "invalid data: {msg}"),
+            Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            Error::IO(msg) => write!(f, "io error: {msg}"),
+            Error::ReadOnly => write!(f, "read-only transaction"),
+            Error::Serialization => write!(f, "serialization failure, retry transaction"),
         }
     }
 }
 
 impl Error {
+    /// Returns whether the error is considered deterministic. Raft state
+    /// machine application needs to know whether a command failure is
+    /// deterministic on the input command -- if it is, the command can be
+    /// considered applied and the error returned to the client, but otherwise
+    /// the state machine must panic to prevent node divergence.
     pub fn is_deterministic(&self) -> bool {
         match self {
             // Aborts don't happen during application, only leader changes. But
@@ -49,33 +64,31 @@ impl Error {
     }
 }
 
+/// Constructs an Error::InvalidData for the given format string.
 #[macro_export]
 macro_rules! errdata {
-    ($($args:tt)*) => {$crate::error::Error::InvaildData(format!($($args)*).into())};
+    ($($args:tt)*) => { $crate::error::Error::InvalidData(format!($($args)*)).into() };
 }
 
+/// Constructs an Error::InvalidInput for the given format string.
 #[macro_export]
 macro_rules! errinput {
-    ($($args:tt)*) => {$crate::error::Error::InvalidInput(format!($($args)*).into())};
+    ($($args:tt)*) => { $crate::error::Error::InvalidInput(format!($($args)*)).into() };
 }
 
-/// A type alias for `Result<T, Error>`. and specify unified error to result 
+/// A toyDB Result returning Error.
 pub type Result<T> = std::result::Result<T, Error>;
 
-
 impl<T> From<Error> for Result<T> {
-    fn from(e: Error) -> Self {
-        Err(e)
+    fn from(error: Error) -> Self {
+        Err(error)
     }
 }
 
-impl serde::de::Error for Error{
-    fn custom<T>(msg: T) -> Self
-        where
-            T: Display,
-        {
-            Error::InvalidData(msg.to_string())
-        }
+impl serde::de::Error for Error {
+    fn custom<T: Display>(msg: T) -> Self {
+        Error::InvalidData(msg.to_string())
+    }
 }
 
 impl serde::ser::Error for Error {
@@ -84,14 +97,14 @@ impl serde::ser::Error for Error {
     }
 }
 
-impl From<Box<bincode::error::DecodeError>> for Error {
-    fn from(err: Box<bincode::error::DecodeError>) -> Self {
+impl From<bincode::error::DecodeError> for Error {
+    fn from(err: bincode::error::DecodeError) -> Self {
         Error::InvalidData(err.to_string())
     }
 }
 
-impl From<Box<bincode::error::EncodeError>> for Error {
-    fn from(err: Box<bincode::error::EncodeError>) -> Self {
+impl From<bincode::error::EncodeError> for Error {
+    fn from(err: bincode::error::EncodeError) -> Self {
         Error::InvalidData(err.to_string())
     }
 }
@@ -114,8 +127,6 @@ impl<T> From<crossbeam::channel::SendError<T>> for Error {
     }
 }
 
-/// impl crossbeam error for error, RecvError, SendError, TryRecvError, TrySendError
-
 impl From<crossbeam::channel::TryRecvError> for Error {
     fn from(err: crossbeam::channel::TryRecvError) -> Self {
         Error::IO(err.to_string())
@@ -128,7 +139,6 @@ impl<T> From<crossbeam::channel::TrySendError<T>> for Error {
     }
 }
 
-/// impl hdrhistogram error for Error, CreationError, RecordError, 
 impl From<hdrhistogram::CreationError> for Error {
     fn from(err: hdrhistogram::CreationError) -> Self {
         panic!("{err}") // faulty code
@@ -136,7 +146,7 @@ impl From<hdrhistogram::CreationError> for Error {
 }
 
 impl From<hdrhistogram::RecordError> for Error {
-    fn from(err: hdrhistogram::RecordError)  -> Self {
+    fn from(err: hdrhistogram::RecordError) -> Self {
         Error::InvalidInput(err.to_string())
     }
 }
@@ -208,4 +218,3 @@ impl<T> From<std::sync::PoisonError<T>> for Error {
         panic!("{err}")
     }
 }
-
