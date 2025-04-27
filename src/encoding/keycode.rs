@@ -1,9 +1,8 @@
-use std::ops::Bound;
 use crate::errdata;
 use crate::error::{Error, Result};
+use std::ops::Bound;
 
 use serde::{de, de::IntoDeserializer as _, ser};
-
 
 /// Serializes a key to a binary KeyCode representation.
 ///
@@ -15,7 +14,8 @@ pub fn serialize<T: ser::Serialize>(key: &T) -> Vec<u8> {
     let mut serializer = Serializer { output: Vec::new() };
     // Panic on serialization failures, as this is typically an issue with the
     // provided data structure.
-    key.serialize(&mut serializer).expect("keycode serialization failed");
+    key.serialize(&mut serializer)
+        .expect("keycode serialization failed");
     serializer.output
 }
 
@@ -45,13 +45,17 @@ pub fn prefix_range(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     let start = Bound::Included(prefix.to_vec());
     let end = match prefix.iter().rposition(|b| *b != 0xff) {
         Some(i) => Bound::Excluded(
-            prefix.iter().take(i).copied().chain(std::iter::once(prefix[i] + 1)).collect(),
+            prefix
+                .iter()
+                .take(i)
+                .copied()
+                .chain(std::iter::once(prefix[i] + 1))
+                .collect(),
         ),
         None => Bound::Unbounded,
     };
     (start, end)
 }
-
 
 /// Serializes keys as binary byte vectors.
 struct Serializer {
@@ -313,7 +317,10 @@ impl<'de> Deserializer<'de> {
     /// there aren't enough bytes left.
     fn take_bytes(&mut self, len: usize) -> Result<&[u8]> {
         if self.input.len() < len {
-            return errdata!("insufficient bytes, expected {len} bytes for {:x?}", self.input);
+            return errdata!(
+                "insufficient bytes, expected {len} bytes for {:x?}",
+                self.input
+            );
         }
         let bytes = &self.input[..len];
         self.input = &self.input[len..];
@@ -725,4 +732,3 @@ mod tests {
         vec_u8: "0000" as Vec<u8>,
     }
 }
-

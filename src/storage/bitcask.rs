@@ -1,19 +1,19 @@
-// std import 
-use std::collections::BTreeMap;
+// std import
 use std::collections::btree_map::Range;
-use std::fs::{ File};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read as _, Seek as _, SeekFrom, Write as _};
+use std::ops::{Bound, RangeBounds};
 use std::path::PathBuf;
-use std::io::{BufReader, BufWriter, SeekFrom, Seek as _, Read as _, Write as _};
 use std::result::Result as StdResult;
-use std::ops::{RangeBounds, Bound};
 
 // third-party import
 use fs4::fs_std::FileExt;
 use log::{error, info};
 
 // project import
-use crate::error::{Result, Error};
 use super::{Engine, Status};
+use crate::error::{Error, Result};
 
 pub struct BitCask {
     log: Log,
@@ -26,10 +26,7 @@ impl BitCask {
         let mut log = Log::new(path.clone())?;
         let keydir = log.build_keydir()?;
         info!("Indexed {} live keys in {}", keydir.len(), path.display());
-        Ok(Self{
-            log,
-            keydir,
-        })
+        Ok(Self { log, keydir })
     }
 
     pub fn new_maybe_compact(
@@ -37,35 +34,32 @@ impl BitCask {
         garbage_min_fraction: f64,
         garbage_min_bytes: u64,
     ) -> Result<Self> {
-
         let mut engine = Self::new(path)?;
         let status = engine.status()?;
         let garbage_size = status.garbage_disk_size();
         let garbage_fraction = garbage_size as f64 / status.disk_size as f64;
-        if garbage_size > 0 
-            && garbage_fraction >= garbage_min_fraction 
-            && garbage_size >= garbage_min_bytes 
-            {
-                info!(
-                    "Compacting {} to remove {:.0}% garbage {:.1} MB out of {:.1} MB",
-                    engine.log.path.display(),
-                    garbage_fraction * 100 as f64,
-                    garbage_size as f64 / (1024 * 1024) as f64,
-                    status.disk_size as f64 / (1024 * 1024) as f64,
-                );
-                engine.compact()?;
-                info!(
-                    "Compacted {} to size {:.1} MB",
-                    engine.log.path.display(),
-                    (status.disk_size - garbage_size) as f64 / (1024 * 1024) as f64,
-                );
-            }
+        if garbage_size > 0
+            && garbage_fraction >= garbage_min_fraction
+            && garbage_size >= garbage_min_bytes
+        {
+            info!(
+                "Compacting {} to remove {:.0}% garbage {:.1} MB out of {:.1} MB",
+                engine.log.path.display(),
+                garbage_fraction * 100 as f64,
+                garbage_size as f64 / (1024 * 1024) as f64,
+                status.disk_size as f64 / (1024 * 1024) as f64,
+            );
+            engine.compact()?;
+            info!(
+                "Compacted {} to size {:.1} MB",
+                engine.log.path.display(),
+                (status.disk_size - garbage_size) as f64 / (1024 * 1024) as f64,
+            );
+        }
 
-        return Ok(engine)
-        
+        return Ok(engine);
     }
 }
-
 
 impl Engine for BitCask {
     type ScanIterator<'a> = ScanIterator<'a>;
@@ -95,14 +89,18 @@ impl Engine for BitCask {
 
     fn scan(&mut self, range: impl RangeBounds<Vec<u8>>) -> Self::ScanIterator<'_>
     where
-        Self: Sized {
-            ScanIterator {
-                inner: self.keydir.range(range),
-                log:&mut self.log,
-            }
+        Self: Sized,
+    {
+        ScanIterator {
+            inner: self.keydir.range(range),
+            log: &mut self.log,
         }
+    }
 
-    fn scan_dyn(&mut self, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Box<dyn super::ScanIterator + '_> {
+    fn scan_dyn(
+        &mut self,
+        range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> Box<dyn super::ScanIterator + '_> {
         Box::new(self.scan(range))
     }
 
@@ -114,7 +112,11 @@ impl Engine for BitCask {
 
     fn status(&mut self) -> Result<Status> {
         let keys = self.keydir.len() as u64;
-        let size = self.keydir.iter().map(|(k, vl)| (k.len() + vl.length) as u64).sum();
+        let size = self
+            .keydir
+            .iter()
+            .map(|(k, vl)| (k.len() + vl.length) as u64)
+            .sum();
         let disk_size = self.log.file.metadata()?.len();
         let live_disk_size = size + 8 * keys;
         Ok(Status {
@@ -125,13 +127,9 @@ impl Engine for BitCask {
             live_disk_size,
         })
     }
-
-
-
 }
 
 impl BitCask {
-
     /// Compacts the current log file by writing out a new log file containing
     /// only live keys and replacing the current file with it.
     fn compact(&mut self) -> Result<()> {
@@ -152,10 +150,8 @@ impl BitCask {
         self.keydir = new_keydir;
 
         Ok(())
-        
     }
 }
-
 
 pub struct ScanIterator<'a> {
     inner: Range<'a, Vec<u8>, ValueLocation>,
@@ -169,18 +165,17 @@ impl ScanIterator<'_> {
     }
 }
 
-
 impl Iterator for ScanIterator<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|item|self.map(item))
+        self.inner.next().map(|item| self.map(item))
     }
 }
 
 impl DoubleEndedIterator for ScanIterator<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.inner.next_back().map(|item|self.map(item))
+        self.inner.next_back().map(|item| self.map(item))
     }
 }
 
@@ -193,11 +188,10 @@ pub struct ValueLocation {
 }
 
 impl ValueLocation {
-    fn end(&self,) -> u64 {
+    fn end(&self) -> u64 {
         self.offset + self.length as u64
     }
 }
-
 
 /// A BitCask append-only log file, containing a sequence of key/value
 /// entries encoded as follows;
@@ -224,14 +218,13 @@ impl Log {
             .open(&path)?;
 
         // get lock
-        if !file.try_lock_exclusive()?{
+        if !file.try_lock_exclusive()? {
             return Err(Error::IO(format!("file {path:?} is already locked")));
-
         }
-        Ok(Self {file, path})
+        Ok(Self { file, path })
     }
 
-    fn build_keydir(&mut self) -> Result<KeyDir>{
+    fn build_keydir(&mut self) -> Result<KeyDir> {
         let mut len_buf = [0u8; 4];
         let mut keydir = KeyDir::new();
         let file_len = self.file.metadata()?.len();
@@ -293,7 +286,6 @@ impl Log {
         }
 
         Ok(keydir)
-
     }
 
     // read the value from the log file
@@ -324,12 +316,8 @@ impl Log {
             offset: offset + 8 + key.len() as u64,
             length: value.map_or(0, |v| v.len()),
         })
-
-
     }
 }
-
-
 
 /// Most storage tests are Goldenscripts under src/storage/testscripts.
 #[cfg(test)]
@@ -524,7 +512,11 @@ mod tests {
                 r.read_exact(&mut len_buf)?;
                 let value_len_or_tombstone = i32::from_be_bytes(len_buf); // NB: -1 for tombstones
                 let value_len = value_len_or_tombstone.max(0) as u32;
-                writeln!(output, " valuelen={value_len_or_tombstone} [{}]", hex::encode(len_buf))?;
+                writeln!(
+                    output,
+                    " valuelen={value_len_or_tombstone} [{}]",
+                    hex::encode(len_buf)
+                )?;
 
                 let mut key = vec![0; key_len as usize];
                 r.read_exact(&mut key)?;

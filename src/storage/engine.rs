@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::encoding::keycode;
 use crate::error::Result;
 
-
 pub trait Engine: Send {
     // the iterator returned by [`Engine::scan`]
     type ScanIterator<'a>: ScanIterator + 'a
@@ -36,7 +35,6 @@ pub trait Engine: Send {
     fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()>;
 
     fn status(&mut self) -> Result<Status>;
-
 }
 
 /// A scan Iterator over key/value pair, returned by [`Engine::scan`]
@@ -44,12 +42,11 @@ pub trait ScanIterator: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>> {
 
 impl<I: DoubleEndedIterator<Item = Result<(Vec<u8>, Vec<u8>)>>> ScanIterator for I {}
 
-
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Status {
     pub name: String,
     pub keys: u64,
-    pub size:u64,
+    pub size: u64,
     pub disk_size: u64,
     pub live_disk_size: u64,
 }
@@ -59,14 +56,13 @@ impl Status {
         self.disk_size - self.live_disk_size
     }
 
-    pub fn garbage_disk_percent(&self,) -> f64 {
-        if self.disk_size == 0{
+    pub fn garbage_disk_percent(&self) -> f64 {
+        if self.disk_size == 0 {
             return 0.0;
         }
         self.garbage_disk_size() as f64 / self.disk_size as f64
     }
 }
-
 
 /// Test helpers for engines.
 #[cfg(test)]
@@ -114,7 +110,11 @@ pub mod test {
                     let key = decode_binary(&args.next_pos().ok_or("key not given")?.value);
                     args.reject_rest()?;
                     let value = self.engine.get(&key)?;
-                    writeln!(output, "{}", format::Raw::key_maybe_value(&key, value.as_deref()))?;
+                    writeln!(
+                        output,
+                        "{}",
+                        format::Raw::key_maybe_value(&key, value.as_deref())
+                    )?;
                 }
 
                 // scan [reverse=BOOL] RANGE
@@ -264,7 +264,10 @@ pub mod test {
 
         fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
             self.inner.set(key, value.clone())?;
-            self.tx.send(Operation::Set { key: key.to_vec(), value })?;
+            self.tx.send(Operation::Set {
+                key: key.to_vec(),
+                value,
+            })?;
             Ok(())
         }
 
@@ -316,7 +319,9 @@ pub mod test {
         where
             Self: Sized,
         {
-            let a = self.a.scan((range.start_bound().cloned(), range.end_bound().cloned()));
+            let a = self
+                .a
+                .scan((range.start_bound().cloned(), range.end_bound().cloned()));
             let b = self.b.scan(range);
             MirrorIterator { a, b }
         }
@@ -370,4 +375,3 @@ pub mod test {
         }
     }
 }
-

@@ -1,6 +1,6 @@
-pub mod keycode;
-pub mod format;
 pub mod bincode;
+pub mod format;
+pub mod keycode;
 
 use crate::error::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};

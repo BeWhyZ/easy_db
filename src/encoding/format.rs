@@ -22,7 +22,9 @@ pub trait Formatter {
     /// Formats a key/value pair, where the value may not exist.
     fn key_maybe_value(key: &[u8], value: Option<&[u8]>) -> String {
         let fkey = Self::key(key);
-        let fvalue = value.map(|v| Self::value(key, v)).unwrap_or("None".to_string());
+        let fvalue = value
+            .map(|v| Self::value(key, v))
+            .unwrap_or("None".to_string());
         format!("{fkey} → {fvalue}")
     }
 }
@@ -32,7 +34,11 @@ pub struct Raw;
 
 impl Raw {
     pub fn bytes(bytes: &[u8]) -> String {
-        let escaped = bytes.iter().copied().flat_map(std::ascii::escape_default).collect_vec();
+        let escaped = bytes
+            .iter()
+            .copied()
+            .flat_map(std::ascii::escape_default)
+            .collect_vec();
         let string = String::from_utf8_lossy(&escaped);
         format!("\"{string}\"")
     }

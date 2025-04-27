@@ -103,7 +103,11 @@ impl TestServer {
             .spawn()?;
 
         let (_, sql_port) = ports.get(&id).copied().expect("node not in ports");
-        Ok(Self { id, child, sql_port })
+        Ok(Self {
+            id,
+            child,
+            sql_port,
+        })
     }
 
     /// Generates a config file for the given node.
@@ -139,6 +143,8 @@ impl Drop for TestServer {
     // Kills the child process when dropped.
     fn drop(&mut self) {
         self.child.kill().expect("failed to kill node");
-        self.child.wait().expect("failed to wait for node to terminate");
+        self.child
+            .wait()
+            .expect("failed to wait for node to terminate");
     }
 }
