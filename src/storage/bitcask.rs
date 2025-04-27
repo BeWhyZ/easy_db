@@ -106,7 +106,6 @@ impl Engine for BitCask {
         Box::new(self.scan(range))
     }
 
-   
     fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
         let val_loc = self.log.write_entry(key, Some(&*value))?;
         self.keydir.insert(key.to_vec(), val_loc);
@@ -132,7 +131,27 @@ impl Engine for BitCask {
 }
 
 impl BitCask {
+
+    /// Compacts the current log file by writing out a new log file containing
+    /// only live keys and replacing the current file with it.
     fn compact(&mut self) -> Result<()> {
+        let new_path = self.log.path.with_extension("new");
+        let mut new_log = Log::new(new_path)?;
+
+        let mut new_keydir = KeyDir::new();
+        for (k, val_loc) in &self.keydir {
+            let value = self.log.read_value(*val_loc)?;
+            let val_loc = new_log.write_entry(k, Some(&value))?;
+            new_keydir.insert(k.clone(), val_loc);
+        }
+
+        // rename the new log to the old
+        std::fs::rename(&new_log.path, &self.log.path)?;
+        new_log.path = self.log.path.clone();
+        self.log = new_log;
+        self.keydir = new_keydir;
+
+        Ok(())
         
     }
 }
@@ -145,19 +164,17 @@ pub struct ScanIterator<'a> {
 
 impl ScanIterator<'_> {
     fn map(&mut self, item: (&Vec<u8>, &ValueLocation)) -> <Self as Iterator>::Item {
-        // read the value from the log file
-        let (key, val_loc) = item;
-        Ok((key.clone(), self.log.read_value(*val_loc)?))
+        let (key, value_loc) = item;
+        Ok((key.clone(), self.log.read_value(*value_loc)?))
     }
 }
+
 
 impl Iterator for ScanIterator<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|item|{
-            self.map(item)
-        })
+        self.inner.next().map(|item|self.map(item))
     }
 }
 
@@ -220,53 +237,61 @@ impl Log {
         let file_len = self.file.metadata()?.len();
         let mut r = BufReader::new(&mut self.file);
         let mut offset = r.seek(SeekFrom::Start(0))?;
+
         while offset < file_len {
+            // Read the next entry from the file, returning the key and value
+            // location, or None for tombstones.
             let result = || -> StdResult<(Vec<u8>, Option<ValueLocation>), std::io::Error> {
-                // read key and value length
+                // Read the key length: 4-byte u32.
                 r.read_exact(&mut len_buf)?;
                 let key_len = u32::from_be_bytes(len_buf);
+
+                // Read the value length: 4-byte i32, -1 for tombstones.
                 r.read_exact(&mut len_buf)?;
                 let value_loc = match i32::from_be_bytes(len_buf) {
-                    ..0 => None,
-                    val_len => Some(ValueLocation{
+                    ..0 => None, // tombstone
+                    len => Some(ValueLocation {
                         offset: offset + 8 + key_len as u64,
-                        length: val_len as usize,
+                        length: len as usize,
                     }),
                 };
 
-                // read the key
+                // Read the key.
                 let mut key = vec![0; key_len as usize];
                 r.read_exact(&mut key)?;
-                // skip the value
+
+                // Skip past the value.
                 if let Some(value_loc) = value_loc {
                     if value_loc.end() > file_len {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
-                            format!("value extends beyond end of file")
+                            "value extends beyond end of file",
                         ));
                     }
                     r.seek_relative(value_loc.length as i64)?;
                 }
 
-                // update the offset, key and value length and the key and value,to next entry
-                offset += 8 + key_len as u64 + key_len as u64 + value_loc.map_or(0, |v| v.length as u64);
+                // Update the file offset.
+                offset += 8 + key_len as u64 + value_loc.map_or(0, |v| v.length) as u64;
 
                 Ok((key, value_loc))
-
             }();
+
+            // Update the keydir with the entry.
             match result {
-                Ok((key, Some(value_loc))) => {
-                    keydir.insert(key, value_loc);
-                },
-                Ok((key, None)) => {keydir.remove(&key);},
+                Ok((key, Some(value_loc))) => keydir.insert(key, value_loc),
+                Ok((key, None)) => keydir.remove(&key),
+                // If an incomplete entry was found at the end of the file, assume an
+                // incomplete write and truncate the file.
                 Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    error!("Found incomplete Entry at offset {offset}, truncating file");
+                    error!("Found incomplete entry at offset {offset}, truncating file");
                     self.file.set_len(offset)?;
                     break;
-                },
+                }
                 Err(err) => return Err(err.into()),
             };
         }
+
         Ok(keydir)
 
     }
@@ -391,7 +416,8 @@ mod tests {
             }
 
             let mut engine = BitCask::new(truncpath.clone())?;
-            assert_eq!(expect, engine.scan(..).collect::<Result<Vec<_>>>()?);
+            let get = engine.scan(..).collect::<Result<Vec<_>>>()?;
+            assert_eq!(expect, get);
         }
         Ok(())
     }
