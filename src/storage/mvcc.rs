@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
-use crate::encoding;
+use crate::encoding::{self, Key as _, Value as _, bincode, keycode};
 use crate::error::Result;
 use crate::storage::engine::Engine;
 
@@ -58,6 +58,7 @@ enum KeyPrefix<'a> {
     ),
     Unversioned,
 }
+impl<'a> encoding::Key<'a> for KeyPrefix<'a> {}
 
 /// An MVCC-based transactional key-value engine. It wraps an underlying storage
 /// engine that's used for raw key/value storage.
@@ -100,6 +101,37 @@ impl encoding::Value for TransactionState {}
 
 impl<E: Engine> Transaction<E> {
     pub fn begin(engine: Arc<Mutex<E>>) -> Result<Self> {
+        let mut session = engine.lock()?;
         
+        let version = match session.get(&Key::NextVersion.encode())? {
+            Some(ref v) => Version::decode(&v)?,
+            None => 1,
+        };
+
+        session.set(&Key::NextVersion.encode(), (version + 1).encode())?;
+        
+        // Fetch the current set of active transactions, persist it for
+        // time-travel queries if non-empty, then add this txn to it.
+        let active = Self::scan_active(&mut session)?;
+        if !active.is_empty() {
+            session.set(&Key::TxnActiveSnapshot(version).encode(), active.encode())?;
+        }
+        session.set(&Key::TxnActive(version).encode(), vec![])?;
+        drop(session);
+
+        return Ok(Self {
+            engine,
+            state: TransactionState {
+                version,
+                read_only: false,
+                active,
+            },
+        });
+
+    }
+
+
+    fn scan_active(session: &mut MutexGuard<E>) -> Result<BTreeSet<Version>> {
+        unimplemented!()
     }
 }
