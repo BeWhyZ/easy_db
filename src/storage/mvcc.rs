@@ -6,7 +6,7 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 
 use crate::encoding::{self, Key as _, Value as _, bincode, keycode};
-use crate::error::Result;
+use crate::error::{Result, Error};
 use crate::storage::engine::Engine;
 use crate::{errdata, errinput};
 
@@ -153,6 +153,18 @@ pub struct TransactionState {
     pub active: BTreeSet<Version>,
 }
 impl encoding::Value for TransactionState {}
+
+impl TransactionState {
+    pub fn is_visible(&self, version: Version) -> bool {
+        if self.active.contains(&version) {
+            false
+        } else if self.read_only {
+            version < self.version
+        } else {
+            version <= self.version
+        }
+    }
+}
 
 impl From<TransactionState> for Cow<'_, TransactionState> {
     fn from(txn: TransactionState) -> Self {
@@ -316,9 +328,9 @@ impl<E: Engine> Transaction<E> {
             match Key::decode(&k)? {
                 Key::TxnWrite(_, k) => {
                     rollback.push(Key::Version(k, self.state.version).encode())
+                    // the version
                 },
                 _ => return errdata!("expected TxnWrite key, got {k:?}"),
-
             };
             rollback.push(k); // the TxnWrite record
         }
@@ -331,4 +343,72 @@ impl<E: Engine> Transaction<E> {
         session.delete(&Key::TxnActive(self.state.version).encode())
 
     }
+
+
+    /// Deletes a key.
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
+        self.write_version(key, None)
+    }
+
+    /// Sets a value for a key.
+    pub fn set(&self, key: &[u8], value: Vec<u8>) -> Result<()> {
+        self.write_version(key, Some(value))
+    }
+
+    /// Writes a new version for a key at the transaction's version. None writes
+    /// a deletion tombstone. If a write conflict is found (either a newer or
+    /// uncommitted version), a serialization error is returned.  Replacing our
+    /// own uncommitted write is fine.
+    fn write_version(&self, key: &[u8], value: Option<Vec<u8>>) -> Result<()> {
+        if self.state.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let mut session = self.engine.lock()?;
+
+        let from = Key::Version(
+            key.into(),
+            self.state.active.iter().min().copied().unwrap_or(self.state.version + 1),
+        ).encode();
+        let to = Key::Version(key.into(), u64::MAX).encode();
+        if let Some((key, _)) = session.scan(from..=to).last().transpose()? {
+            match Key::decode(&key)? {
+                Key::Version(_, version) => {
+                    if !self.state.is_visible(version){
+                        return Err(Error::Serialization);
+                    }
+                },
+                key => return errdata!("expected Version key, got {key:?}"),
+            }
+        }
+        session.set(&Key::TxnWrite(self.state.version, key.into()).encode(), vec![])?;
+        session.set(&Key::Version(key.into(), self.state.version).encode(), bincode::serialize(&value))
+    }
+
+    /// Fetches a key's value, or None if it does not exist.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut session = self.engine.lock()?;
+        let from = Key::Version(key.into(), 0).encode();
+        let to = Key::Version(key.into(), self.state.version).encode();
+
+        let mut scan = session.scan(from..=to).rev();
+        while let Some((key, value)) = scan.next().transpose()? {
+            match Key::decode(&key)? {
+                Key::Version(_, version) => {
+                    if self.state.is_visible(version) {
+                        return bincode::deserialize(&value);
+                    }
+                },
+                key => return errdata!("expected Version key, got {key:?}"),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns an iterator over the latest visible key/value pairs at the
+    /// transaction's version.
+    pub fn scan(&self, range: impl RangeBounds<Vec<u8>>) -> ScanIterator<E> {
+        unimplemented!()
+    }
+
+
 }
