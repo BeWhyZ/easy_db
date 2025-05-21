@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use itertools::Itertools as _;
@@ -9,6 +10,8 @@ use crate::encoding::{self, Key as _, Value as _, bincode, keycode};
 use crate::error::{Result, Error};
 use crate::storage::engine::Engine;
 use crate::{errdata, errinput};
+
+use super::engine;
 
 pub type Version = u64;
 
@@ -407,8 +410,477 @@ impl<E: Engine> Transaction<E> {
     /// Returns an iterator over the latest visible key/value pairs at the
     /// transaction's version.
     pub fn scan(&self, range: impl RangeBounds<Vec<u8>>) -> ScanIterator<E> {
-        unimplemented!()
+        let start = match range.start_bound() {
+            Bound::Included(k) => Bound::Included(Key::Version(k.into(), 0).encode()),
+            Bound::Excluded(k) => Bound::Excluded(Key::Version(k.into(), u64::MAX).encode()),
+            Bound::Unbounded => Bound::Included(Key::Version(vec![].into(), 0).encode()),
+        };
+        let end = match range.end_bound() {
+            Bound::Included(k) => Bound::Included(Key::Version(k.into(), u64::MAX).encode()),
+            Bound::Excluded(k) => Bound::Excluded(Key::Version(k.into(), 0).encode()),
+            Bound::Unbounded => Bound::Excluded(KeyPrefix::Unversioned.encode()),
+        };
+        ScanIterator::new(self.engine.clone(), self.state().clone(), (start, end))
+    }
+
+    pub fn scan_prefix(&self, prefix: &[u8]) -> ScanIterator<E> {
+        let mut prefix = KeyPrefix::Version(prefix.into()).encode();
+        prefix.truncate(prefix.len() - 1);
+        let range = keycode::prefix_range(&prefix);
+        ScanIterator::new(self.engine.clone(), self.state().clone(), range)
     }
 
 
 }
+
+/// An iterator over the latest live and visible key/value pairs for the txn.
+///
+/// The (single-threaded) engine is shared via mutex, and holding the mutex for
+/// the lifetime of the iterator can cause deadlocks (e.g. when the local SQL
+/// engine pulls from two tables concurrently during a join). Instead, we pull
+/// and buffer a batch of rows at a time, and release the mutex in between.
+///
+/// This does not implement DoubleEndedIterator (reverse scans), since the SQL
+/// layer doesn't currently need it.
+pub struct ScanIterator<E: Engine> {
+    engine: Arc<Mutex<E>>, 
+    txn: TransactionState,
+    buffer: VecDeque<(Vec<u8>, Vec<u8>)>,
+
+    // the remaining range after the buffer
+    remainder: Option<(Bound<Vec<u8>>, Bound<Vec<u8>>)>,
+}
+
+impl<E: Engine> Clone for ScanIterator<E> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: Arc::clone(&self.engine),
+            txn: self.txn.clone(),
+            buffer: self.buffer.clone(),
+            remainder: self.remainder.clone(),
+        }
+    }
+}
+
+
+impl<E: Engine> ScanIterator<E> {
+    const BUFFER_SIZE: usize = if cfg!(test) {2} else { 32};
+
+    fn new(engine: Arc<Mutex<E>>, txn: TransactionState, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Self {
+        Self {
+            engine,
+            txn,
+            buffer: VecDeque::with_capacity(Self::BUFFER_SIZE),
+            remainder: Some(range),
+        }
+    }
+    /// Fills the buffer, if there's any pending items.
+    fn fill_buffer(&mut self) -> Result<()> {
+        if self.buffer.len() >= Self::BUFFER_SIZE {
+            return Ok(());
+        }
+
+        let Some(range) = self.remainder.take() else {
+            return Ok(());
+        };
+        let range_end = range.1.clone();
+
+        let mut engine = self.engine.lock()?;
+        let mut iter = VersionIterator::new(&self.txn, engine.scan(range)).peekable();
+        while let Some((key, _, value)) = iter.next().transpose()? {
+            match iter.peek() {
+                Some(Ok((next, _, _,) )) if next == &key => continue,
+                Some(Err(err)) => return Err(err.clone()),
+                Some(Ok(_)) | None => {},
+            }
+            let Some(value) = bincode::deserialize(&value)? else {
+                continue;
+            };
+
+            self.buffer.push_back((key, value));
+            if self.buffer.len() == Self::BUFFER_SIZE {
+                if let Some((next, version, _)) = iter.next().transpose()? {
+                    let range_start = Bound::Included(Key::Version(next.into(), version).encode());
+                    self.remainder = Some((range_start, range_end));
+                }
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+}
+
+impl<E: Engine> Iterator for ScanIterator<E > {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.is_empty() {
+            if let Err(err) = self.fill_buffer() {
+                return Some(Err(err));
+            }
+        }
+
+        self.buffer.pop_front().map(Ok)
+    }
+}
+
+
+pub struct VersionIterator<'a, I: engine::ScanIterator> {
+    txn: &'a TransactionState,
+    inner: I,
+}
+
+impl<'a, I: engine::ScanIterator> VersionIterator<'a, I> {
+    fn new(txn: &'a TransactionState, inner: I) -> Self {
+        Self { txn, inner}
+    }
+
+    fn try_next(&mut self) -> Result<Option<(Vec<u8>, Version, Vec<u8>)>> {
+        while let Some((key, value)) = self.inner.next().transpose()? {
+            let Key::Version(key, version) = Key::decode(&key)? else {
+                return errdata!("expected Key::Version, got {key:?}");
+            };
+            if !self.txn.is_visible(version) {
+                continue;
+            }
+
+            return Ok(Some((key.into_owned(), version, value)));
+
+        }
+        Ok(None)
+    }
+}
+
+impl<I: engine::ScanIterator> Iterator for VersionIterator<'_, I> {
+    type Item = Result<(Vec<u8>, Version, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.try_next().transpose()
+    }
+}
+
+
+/// Most storage tests are Goldenscripts under src/storage/testscripts.
+#[cfg(test)]
+pub mod tests {
+    use std::collections::HashMap;
+    use std::error::Error;
+    use std::fmt::Write as _;
+    use std::path::Path;
+    use std::result::Result;
+
+    use crossbeam::channel::Receiver;
+    use tempfile::TempDir;
+    use test_case::test_case;
+    use test_each_file::test_each_path;
+
+    use super::*;
+    use crate::encoding::format::{self, Formatter as _};
+    use crate::storage::engine::test::{Emit, Mirror, Operation, decode_binary, parse_key_range};
+    use crate::storage::{BitCask, Memory};
+
+    // Run goldenscript tests in src/storage/testscripts/mvcc.
+    test_each_path! { in "src/storage/testscripts/mvcc" as scripts => test_goldenscript }
+
+    fn test_goldenscript(path: &Path) {
+        goldenscript::run(&mut MVCCRunner::new(), path).expect("goldenscript failed")
+    }
+
+    /// Tests that key prefixes are actually prefixes of keys.
+    #[test_case(KeyPrefix::NextVersion, Key::NextVersion; "NextVersion")]
+    #[test_case(KeyPrefix::TxnActive, Key::TxnActive(1); "TxnActive")]
+    #[test_case(KeyPrefix::TxnActiveSnapshot, Key::TxnActiveSnapshot(1); "TxnActiveSnapshot")]
+    #[test_case(KeyPrefix::TxnWrite(1), Key::TxnWrite(1, b"foo".as_slice().into()); "TxnWrite")]
+    #[test_case(KeyPrefix::Version(b"foo".as_slice().into()), Key::Version(b"foo".as_slice().into(), 1); "Version")]
+    #[test_case(KeyPrefix::Unversioned, Key::Unversioned(b"foo".as_slice().into()); "Unversioned")]
+    fn key_prefix(prefix: KeyPrefix, key: Key) {
+        let prefix = prefix.encode();
+        let key = key.encode();
+        assert_eq!(prefix, key[..prefix.len()])
+    }
+
+    /// Runs MVCC goldenscript tests.
+    pub struct MVCCRunner {
+        mvcc: MVCC<TestEngine>,
+        txns: HashMap<String, Transaction<TestEngine>>,
+        op_rx: Receiver<Operation>,
+        _tempdir: TempDir,
+    }
+
+    type TestEngine = Emit<Mirror<BitCask, Memory>>;
+
+    impl MVCCRunner {
+        fn new() -> Self {
+            // Use both a BitCask and a Memory engine, and mirror operations
+            // across them. Emit engine operations to op_rx.
+            let (op_tx, op_rx) = crossbeam::channel::unbounded();
+            let tempdir = TempDir::with_prefix("toydb").expect("tempdir failed");
+            let bitcask = BitCask::new(tempdir.path().join("bitcask")).expect("bitcask failed");
+            let memory = Memory::new();
+            let engine = Emit::new(Mirror::new(bitcask, memory), op_tx);
+            let mvcc = MVCC::new(engine);
+            Self { mvcc, op_rx, txns: HashMap::new(), _tempdir: tempdir }
+        }
+
+        /// Fetches the named transaction from a command prefix.
+        fn get_txn(
+            &mut self,
+            prefix: &Option<String>,
+        ) -> Result<&'_ mut Transaction<TestEngine>, Box<dyn Error>> {
+            let name = Self::txn_name(prefix)?;
+            self.txns.get_mut(name).ok_or(format!("unknown txn {name}").into())
+        }
+
+        /// Fetches the txn name from a command prefix, or errors.
+        fn txn_name(prefix: &Option<String>) -> Result<&str, Box<dyn Error>> {
+            prefix.as_deref().ok_or("no txn name".into())
+        }
+
+        /// Errors if a txn prefix is given.
+        fn no_txn(command: &goldenscript::Command) -> Result<(), Box<dyn Error>> {
+            if let Some(name) = &command.prefix {
+                return Err(format!("can't run {} with txn {name}", command.name).into());
+            }
+            Ok(())
+        }
+    }
+
+    impl goldenscript::Runner for MVCCRunner {
+        fn run(&mut self, command: &goldenscript::Command) -> Result<String, Box<dyn Error>> {
+            let mut output = String::new();
+            let mut tags = command.tags.clone();
+
+            match command.name.as_str() {
+                // txn: begin [readonly] [as_of=VERSION]
+                "begin" => {
+                    let name = Self::txn_name(&command.prefix)?;
+                    if self.txns.contains_key(name) {
+                        return Err(format!("txn {name} already exists").into());
+                    }
+                    let mut args = command.consume_args();
+                    let readonly = match args.next_pos().map(|a| a.value.as_str()) {
+                        Some("readonly") => true,
+                        None => false,
+                        Some(v) => return Err(format!("invalid argument {v}").into()),
+                    };
+                    let as_of = args.lookup_parse("as_of")?;
+                    args.reject_rest()?;
+                    let txn = match (readonly, as_of) {
+                        (false, None) => self.mvcc.begin()?,
+                        (true, None) => self.mvcc.begin_read_only()?,
+                        (true, Some(v)) => self.mvcc.begin_as_of(v)?,
+                        (false, Some(_)) => return Err("as_of only valid for read-only txn".into()),
+                    };
+                    self.txns.insert(name.to_string(), txn);
+                }
+
+                // txn: commit
+                "commit" => {
+                    let name = Self::txn_name(&command.prefix)?;
+                    let txn = self.txns.remove(name).ok_or(format!("unknown txn {name}"))?;
+                    command.consume_args().reject_rest()?;
+                    txn.commit()?;
+                }
+
+                // txn: delete KEY...
+                "delete" => {
+                    let txn = self.get_txn(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    for arg in args.rest_pos() {
+                        let key = decode_binary(&arg.value);
+                        txn.delete(&key)?;
+                    }
+                    args.reject_rest()?;
+                }
+
+                // dump
+                "dump" => {
+                    command.consume_args().reject_rest()?;
+                    let mut engine = self.mvcc.engine.lock().unwrap();
+                    let mut scan = engine.scan(..);
+                    while let Some((key, value)) = scan.next().transpose()? {
+                        let fmtkv = format::MVCC::<format::Raw>::key_value(&key, &value);
+                        let rawkv = format::Raw::key_value(&key, &value);
+                        writeln!(output, "{fmtkv} [{rawkv}]")?;
+                    }
+                }
+
+                // txn: get KEY...
+                "get" => {
+                    let txn = self.get_txn(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    for arg in args.rest_pos() {
+                        let key = decode_binary(&arg.value);
+                        let value = txn.get(&key)?;
+                        let fmtkv = format::Raw::key_maybe_value(&key, value.as_deref());
+                        writeln!(output, "{fmtkv}")?;
+                    }
+                    args.reject_rest()?;
+                }
+
+                // get_unversioned KEY...
+                "get_unversioned" => {
+                    Self::no_txn(command)?;
+                    let mut args = command.consume_args();
+                    for arg in args.rest_pos() {
+                        let key = decode_binary(&arg.value);
+                        let value = self.mvcc.get_unversioned(&key)?;
+                        let fmtkv = format::Raw::key_maybe_value(&key, value.as_deref());
+                        writeln!(output, "{fmtkv}")?;
+                    }
+                    args.reject_rest()?;
+                }
+
+                // import [VERSION] KEY=VALUE...
+                "import" => {
+                    Self::no_txn(command)?;
+                    let mut args = command.consume_args();
+                    let version = args.next_pos().map(|a| a.parse()).transpose()?;
+                    let mut txn = self.mvcc.begin()?;
+                    if let Some(version) = version {
+                        if txn.version() > version {
+                            return Err(format!("version {version} already used").into());
+                        }
+                        while txn.version() < version {
+                            txn = self.mvcc.begin()?;
+                        }
+                    }
+                    for kv in args.rest_key() {
+                        let key = decode_binary(kv.key.as_ref().unwrap());
+                        let value = decode_binary(&kv.value);
+                        if value.is_empty() {
+                            txn.delete(&key)?;
+                        } else {
+                            txn.set(&key, value)?;
+                        }
+                    }
+                    args.reject_rest()?;
+                    txn.commit()?;
+                }
+
+                // txn: resume JSON
+                "resume" => {
+                    let name = Self::txn_name(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    let raw = &args.next_pos().ok_or("state not given")?.value;
+                    args.reject_rest()?;
+                    let state: TransactionState = serde_json::from_str(raw)?;
+                    let txn = self.mvcc.resume(state)?;
+                    self.txns.insert(name.to_string(), txn);
+                }
+
+                // txn: rollback
+                "rollback" => {
+                    let name = Self::txn_name(&command.prefix)?;
+                    let txn = self.txns.remove(name).ok_or(format!("unknown txn {name}"))?;
+                    command.consume_args().reject_rest()?;
+                    txn.rollback()?;
+                }
+
+                // txn: scan [RANGE]
+                "scan" => {
+                    let txn = self.get_txn(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    let range =
+                        parse_key_range(args.next_pos().map(|a| a.value.as_str()).unwrap_or(".."))?;
+                    args.reject_rest()?;
+
+                    let kvs: Vec<_> = txn.scan(range).try_collect()?;
+                    for (key, value) in kvs {
+                        writeln!(output, "{}", format::Raw::key_value(&key, &value))?;
+                    }
+                }
+
+                // txn: scan_prefix PREFIX
+                "scan_prefix" => {
+                    let txn = self.get_txn(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    let prefix = decode_binary(&args.next_pos().ok_or("prefix not given")?.value);
+                    args.reject_rest()?;
+
+                    let kvs: Vec<_> = txn.scan_prefix(&prefix).try_collect()?;
+                    for (key, value) in kvs {
+                        writeln!(output, "{}", format::Raw::key_value(&key, &value))?;
+                    }
+                }
+
+                // txn: set KEY=VALUE...
+                "set" => {
+                    let txn = self.get_txn(&command.prefix)?;
+                    let mut args = command.consume_args();
+                    for kv in args.rest_key() {
+                        let key = decode_binary(kv.key.as_ref().unwrap());
+                        let value = decode_binary(&kv.value);
+                        txn.set(&key, value)?;
+                    }
+                    args.reject_rest()?;
+                }
+
+                // set_unversioned KEY=VALUE...
+                "set_unversioned" => {
+                    Self::no_txn(command)?;
+                    let mut args = command.consume_args();
+                    for kv in args.rest_key() {
+                        let key = decode_binary(kv.key.as_ref().unwrap());
+                        let value = decode_binary(&kv.value);
+                        self.mvcc.set_unversioned(&key, value)?;
+                    }
+                    args.reject_rest()?;
+                }
+
+                // txn: state
+                "state" => {
+                    command.consume_args().reject_rest()?;
+                    let txn = self.get_txn(&command.prefix)?;
+                    let state = txn.state();
+                    write!(
+                        output,
+                        "v{} {} active={{{}}}",
+                        state.version,
+                        if state.read_only { "ro" } else { "rw" },
+                        state.active.iter().sorted().join(",")
+                    )?;
+                }
+
+                // status
+                "status" => writeln!(output, "{:#?}", self.mvcc.status()?)?,
+
+                name => return Err(format!("invalid command {name}").into()),
+            }
+
+            // If requested, output engine operations.
+            if tags.remove("ops") {
+                while let Ok(op) = self.op_rx.try_recv() {
+                    match op {
+                        Operation::Delete { key } => {
+                            let fmtkey = format::MVCC::<format::Raw>::key(&key);
+                            let rawkey = format::Raw::key(&key);
+                            writeln!(output, "engine delete {fmtkey} [{rawkey}]")?
+                        }
+                        Operation::Flush => writeln!(output, "engine flush")?,
+                        Operation::Set { key, value } => {
+                            let fmtkv = format::MVCC::<format::Raw>::key_value(&key, &value);
+                            let rawkv = format::Raw::key_value(&key, &value);
+                            writeln!(output, "engine set {fmtkv} [{rawkv}]")?
+                        }
+                    }
+                }
+            }
+
+            if let Some(tag) = tags.iter().next() {
+                return Err(format!("unknown tag {tag}").into());
+            }
+
+            Ok(output)
+        }
+
+        // Drain unhandled engine operations.
+        fn end_command(&mut self, _: &goldenscript::Command) -> Result<String, Box<dyn Error>> {
+            while self.op_rx.try_recv().is_ok() {}
+            Ok(String::new())
+        }
+    }
+}
+
