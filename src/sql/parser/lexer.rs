@@ -1,0 +1,418 @@
+
+use std::iter::Peekable;
+use std::str::Chars;
+use std::fmt::Display;
+
+use crate::error::Result;
+use crate::errinput;
+
+
+pub struct Lexer<'a> {
+    chars: Peekable<Chars<'a>>,
+}
+
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Token {
+        /// A numeric string, with digits, decimal points, and/or exponents. Leading
+    /// signs (e.g. -) are separate tokens.
+    Number(String),
+    /// A Unicode string, with quotes stripped and escape sequences resolved.
+    String(String),
+    /// An identifier, with any quotes stripped.
+    Ident(String),
+    /// A SQL keyword.
+    Keyword(Keyword),
+    Period,             // .
+    Equal,              // =
+    NotEqual,           // !=
+    GreaterThan,        // >
+    GreaterThanOrEqual, // >=
+    LessThan,           // <
+    LessThanOrEqual,    // <=
+    LessOrGreaterThan,  // <>
+    Plus,               // +
+    Minus,              // -
+    Asterisk,           // *
+    Slash,              // /
+    Caret,              // ^
+    Percent,            // %
+    Exclamation,        // !
+    Question,           // ?
+    Comma,              // ,
+    Semicolon,          // ;
+    OpenParen,          // (
+    CloseParen,         // )
+}
+
+
+impl Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Number(n) => n,
+            Self::String(s) => s,
+            Self::Ident(s) => s,
+            Self::Keyword(k) => return k.fmt(f),
+            Self::Period => ".",
+            Self::Equal => "=",
+            Self::NotEqual => "!=",
+            Self::GreaterThan => ">",
+            Self::GreaterThanOrEqual => ">=",
+            Self::LessThan => "<",
+            Self::LessThanOrEqual => "<=",
+            Self::LessOrGreaterThan => "<>",
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Asterisk => "*",
+            Self::Slash => "/",
+            Self::Caret => "^",
+            Self::Percent => "%",
+            Self::Exclamation => "!",
+            Self::Question => "?",
+            Self::Comma => ",",
+            Self::Semicolon => ";",
+            Self::OpenParen => "(",
+            Self::CloseParen => ")",
+        })
+    }
+}
+
+impl From<Keyword> for Token {
+    fn from(keyword: Keyword) -> Self {
+        Self::Keyword(keyword)
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Keyword {
+    And,
+    As,
+    Asc,
+    Begin,
+    Bool,
+    Boolean,
+    By,
+    Commit,
+    Create,
+    Cross,
+    Default,
+    Delete,
+    Desc,
+    Double,
+    Drop,
+    Exists,
+    Explain,
+    False,
+    Float,
+    From,
+    Group,
+    Having,
+    If,
+    Index,
+    Infinity,
+    Inner,
+    Insert,
+    Int,
+    Integer,
+    Into,
+    Is,
+    Join,
+    Key,
+    Left,
+    Like,
+    Limit,
+    NaN,
+    Not,
+    Null,
+    Of,
+    Offset,
+    On,
+    Only,
+    Or,
+    Order,
+    Outer,
+    Primary,
+    Read,
+    References,
+    Right,
+    Rollback,
+    Select,
+    Set,
+    String,
+    System,
+    Table,
+    Text,
+    Time,
+    Transaction,
+    True,
+    Unique,
+    Update,
+    Values,
+    Varchar,
+    Where,
+    Write,
+}
+
+impl TryFrom<&str> for Keyword {
+    // Use a cheap static string, since this just indicates it's not a keyword.
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        // Only compare lowercase, which is enforced by the lexer. This avoids
+        // allocating a string to change the case. Assert this.
+        debug_assert!(value.chars().all(|c| !c.is_uppercase()), "keyword must be lowercase");
+        Ok(match value {
+            "as" => Self::As,
+            "asc" => Self::Asc,
+            "and" => Self::And,
+            "begin" => Self::Begin,
+            "bool" => Self::Bool,
+            "boolean" => Self::Boolean,
+            "by" => Self::By,
+            "commit" => Self::Commit,
+            "create" => Self::Create,
+            "cross" => Self::Cross,
+            "default" => Self::Default,
+            "delete" => Self::Delete,
+            "desc" => Self::Desc,
+            "double" => Self::Double,
+            "drop" => Self::Drop,
+            "exists" => Self::Exists,
+            "explain" => Self::Explain,
+            "false" => Self::False,
+            "float" => Self::Float,
+            "from" => Self::From,
+            "group" => Self::Group,
+            "having" => Self::Having,
+            "if" => Self::If,
+            "index" => Self::Index,
+            "infinity" => Self::Infinity,
+            "inner" => Self::Inner,
+            "insert" => Self::Insert,
+            "int" => Self::Int,
+            "integer" => Self::Integer,
+            "into" => Self::Into,
+            "is" => Self::Is,
+            "join" => Self::Join,
+            "key" => Self::Key,
+            "left" => Self::Left,
+            "like" => Self::Like,
+            "limit" => Self::Limit,
+            "nan" => Self::NaN,
+            "not" => Self::Not,
+            "null" => Self::Null,
+            "of" => Self::Of,
+            "offset" => Self::Offset,
+            "on" => Self::On,
+            "only" => Self::Only,
+            "or" => Self::Or,
+            "order" => Self::Order,
+            "outer" => Self::Outer,
+            "primary" => Self::Primary,
+            "read" => Self::Read,
+            "references" => Self::References,
+            "right" => Self::Right,
+            "rollback" => Self::Rollback,
+            "select" => Self::Select,
+            "set" => Self::Set,
+            "string" => Self::String,
+            "system" => Self::System,
+            "table" => Self::Table,
+            "text" => Self::Text,
+            "time" => Self::Time,
+            "transaction" => Self::Transaction,
+            "true" => Self::True,
+            "unique" => Self::Unique,
+            "update" => Self::Update,
+            "values" => Self::Values,
+            "varchar" => Self::Varchar,
+            "where" => Self::Where,
+            "write" => Self::Write,
+            _ => return Err("not a keyword"),
+        })
+    }
+}
+
+
+impl Display for Keyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Display keywords as uppercase.
+        f.write_str(match self {
+            Self::As => "AS",
+            Self::Asc => "ASC",
+            Self::And => "AND",
+            Self::Begin => "BEGIN",
+            Self::Bool => "BOOL",
+            Self::Boolean => "BOOLEAN",
+            Self::By => "BY",
+            Self::Commit => "COMMIT",
+            Self::Create => "CREATE",
+            Self::Cross => "CROSS",
+            Self::Default => "DEFAULT",
+            Self::Delete => "DELETE",
+            Self::Desc => "DESC",
+            Self::Double => "DOUBLE",
+            Self::Drop => "DROP",
+            Self::Exists => "EXISTS",
+            Self::Explain => "EXPLAIN",
+            Self::False => "FALSE",
+            Self::Float => "FLOAT",
+            Self::From => "FROM",
+            Self::Group => "GROUP",
+            Self::Having => "HAVING",
+            Self::If => "IF",
+            Self::Index => "INDEX",
+            Self::Infinity => "INFINITY",
+            Self::Inner => "INNER",
+            Self::Insert => "INSERT",
+            Self::Int => "INT",
+            Self::Integer => "INTEGER",
+            Self::Into => "INTO",
+            Self::Is => "IS",
+            Self::Join => "JOIN",
+            Self::Key => "KEY",
+            Self::Left => "LEFT",
+            Self::Like => "LIKE",
+            Self::Limit => "LIMIT",
+            Self::NaN => "NAN",
+            Self::Not => "NOT",
+            Self::Null => "NULL",
+            Self::Of => "OF",
+            Self::Offset => "OFFSET",
+            Self::On => "ON",
+            Self::Only => "ONLY",
+            Self::Outer => "OUTER",
+            Self::Or => "OR",
+            Self::Order => "ORDER",
+            Self::Primary => "PRIMARY",
+            Self::Read => "READ",
+            Self::References => "REFERENCES",
+            Self::Right => "RIGHT",
+            Self::Rollback => "ROLLBACK",
+            Self::Select => "SELECT",
+            Self::Set => "SET",
+            Self::String => "STRING",
+            Self::System => "SYSTEM",
+            Self::Table => "TABLE",
+            Self::Text => "TEXT",
+            Self::Time => "TIME",
+            Self::Transaction => "TRANSACTION",
+            Self::True => "TRUE",
+            Self::Unique => "UNIQUE",
+            Self::Update => "UPDATE",
+            Self::Values => "VALUES",
+            Self::Varchar => "VARCHAR",
+            Self::Where => "WHERE",
+            Self::Write => "WRITE",
+        })
+    }
+}
+
+impl Iterator for Lexer<'_> {
+    type Item = Result<Token>;
+
+    fn next(&mut self) -> Option<Result<Token>> {
+        match self.scan() {
+            Ok(Some(token)) => Some(Ok(token)),
+            // If there's any remaining chars, the lexer didn't recognize them.
+            // Otherwise, we're done lexing.
+            Ok(None) => self.chars.peek().map(|c| errinput!("unexpected character {c}")),
+            Err(err) => Some(Err(err)),
+        }
+    }
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(input:  &'a str) -> Lexer<'a> {
+        Lexer { chars: input.chars().peekable()}
+    }
+
+    fn scan(&mut self) -> Result<Option<Token>> {
+        self.skip_whitespace();
+        match self.chars.peek() {
+            Some('\'') => self.scan_string(),
+            Some('"') => self.scan_ident_quoted(),
+            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()),
+            Some(c) if c.is_alphabetic() => Ok(self.scan_ident_or_keyword()),
+            Some(_) => Ok(self.scan_symbol()),
+            None => Ok(None),
+        }
+    }
+    /// Scans the next number, if any.
+    fn scan_number(&mut self) -> Option<Token> {
+        // Scan the integer part. There must be one digit.
+        let mut number = self.next_if(|c| c.is_ascii_digit())?.to_string();
+        while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
+            number.push(c)
+        }
+        // Scan the fractional part, if any.
+        if self.next_is('.') {
+            number.push('.');
+            while let Some(dec) = self.next_if(|c| c.is_ascii_digit()) {
+                number.push(dec)
+            }
+        }
+        // Scan the exponent, if any.
+        if let Some(exp) = self.next_if(|c| c == 'e' || c == 'E') {
+            number.push(exp);
+            if let Some(sign) = self.next_if(|c| c == '+' || c == '-') {
+                number.push(sign)
+            }
+            while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
+                number.push(c)
+            }
+        }
+        Some(Token::Number(number))
+    }
+
+    
+    /// Scans the next quoted identifier, if any. Case is preserved.
+    fn scan_ident_quoted(&mut self) -> Result<Option<Token>> {
+        if !self.next_is('"') {
+            return Ok(None);
+        }
+        let mut ident = String::new();
+        loop {
+            match self.chars.next() {
+                // "" is the escape sequence for ".
+                Some('"') if self.next_is('"') => ident.push('"'),
+                Some('"') => break,
+                Some(c) => ident.push(c),
+                None => return errinput!("unexpected end of quoted identifier"),
+            }
+        }
+        Ok(Some(Token::Ident(ident)))
+    }
+
+    /// Scans the next quoted string literal, if any.
+    fn scan_string(&mut self) -> Result<Option<Token>> {
+        if !self.next_is('\'') {
+            return Ok(None);
+        }
+        let mut string = String::new();
+        loop {
+            match self.chars.next() {
+                // '' is the escape sequence for '.
+                Some('\'') if self.next_is('\'') => string.push('\''),
+                Some('\'') => break,
+                Some(c) => string.push(c),
+                None => return errinput!("unexpected end of string literal"),
+            }
+        }
+        Ok(Some(Token::String(string)))
+    }
+
+    fn next_is(&mut self, c: char) -> bool {
+        self.next_if(|n| n==c).is_some()
+    }
+
+    fn next_if(&mut self, predicate: impl Fn(char) -> bool) -> Option<char> {
+        self.chars.peek().filter(|&&c| predicate(c))?;
+        self.chars.next()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.next_if(|c| c.is_whitespace()).is_some() {}
+    }
+}

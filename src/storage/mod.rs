@@ -5,3 +5,4 @@ pub mod memory;
 
 pub use engine::{Engine, ScanIterator, Status};
 pub use bitcask::BitCask;
+pub use memory::Memory;

@@ -46,15 +46,22 @@ impl Engine for Memory {
         }
 
     fn scan_dyn(&mut self, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Box<dyn super::ScanIterator + '_>{
-        unimplemented!()
+        Box::new(self.scan(range))
     }
 
     fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()>{
-        unimplemented!()
+        self.0.insert(key.to_vec(), value);
+        Ok(())
     }
 
     fn status(&mut self) -> Result<Status>{
-        unimplemented!()
+        Ok(Status {
+            name: "memory".to_string(),
+            keys: self.0.len() as u64,
+            size: self.0.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum(),
+            disk_size: 0,
+            live_disk_size: 0,
+        })
     }
 
 
@@ -82,3 +89,22 @@ impl DoubleEndedIterator for ScanIterator<'_> {
 
 
 
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use test_each_file::test_each_path;
+
+    use super::super::engine::test::Runner;
+    use super::*;
+
+    // Run common goldenscript tests in src/storage/testscripts/engine.
+    test_each_path! { in "src/storage/testscripts/engine" as engine => test_goldenscript }
+
+    // Also run Memory-specific tests in src/storage/testscripts/memory.
+    test_each_path! { in "src/storage/testscripts/memory" as scripts => test_goldenscript }
+
+    fn test_goldenscript(path: &Path) {
+        goldenscript::run(&mut Runner::new(Memory::new()), path).expect("goldenscript failed")
+    }
+}
