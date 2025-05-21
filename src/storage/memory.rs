@@ -2,9 +2,9 @@
 
 use std::collections::btree_map::Range;
 use std::collections::BTreeMap;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, Bound};
 
-use super::Engine;
+use super::{Engine, Status};
 use crate::error::Result;
 
 
@@ -36,27 +36,26 @@ impl Engine for Memory {
     }
 
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        Ok(self.0.get(key))
+        Ok(self.0.get(key).cloned())
     }
 
     fn scan(&mut self, range: impl RangeBounds<Vec<u8>>) -> Self::ScanIterator<'_>
     where
         Self: Sized{
-            ScanIterator::new()
+            ScanIterator(self.0.range(range))
         }
 
-    fn scan_dyn(&mut self, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Box<dyn ScanIterator + '_>;
-
-    fn scan_prefix(&mut self, prefix: &[u8]) -> Self::ScanIterator<'_>
-    where
-        Self: Sized,
-    {
-        self.scan(keycode::prefix_range(prefix))
+    fn scan_dyn(&mut self, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Box<dyn super::ScanIterator + '_>{
+        unimplemented!()
     }
 
-    fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()>;
+    fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()>{
+        unimplemented!()
+    }
 
-    fn status(&mut self) -> Result<Status>;
+    fn status(&mut self) -> Result<Status>{
+        unimplemented!()
+    }
 
 
 
