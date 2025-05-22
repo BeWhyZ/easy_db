@@ -339,6 +339,60 @@ impl<'a> Lexer<'a> {
             None => Ok(None),
         }
     }
+    fn scan_ident_or_keyword(&mut self) -> Option<Token> {
+        // The first character must be alphabetic. The rest can be numeric.
+        let mut name = self.next_if(|c| c.is_alphabetic())?.to_lowercase().to_string();
+        while let Some(c) = self.next_if(|c| c.is_alphanumeric() || c == '_') {
+            name.extend(c.to_lowercase())
+        }
+        // Check if the identifier matches a keyword.
+        if let Ok(keyword) = Keyword::try_from(name.as_str()) {
+            return Some(Token::Keyword(keyword));
+        }
+        Some(Token::Ident(name))
+    }
+
+    /// Scans the next symbol token, if any.
+    fn scan_symbol(&mut self) -> Option<Token> {
+        let mut token = self.next_if_map(|c| {
+            Some(match c {
+                '.' => Token::Period,
+                '=' => Token::Equal,
+                '>' => Token::GreaterThan,
+                '<' => Token::LessThan,
+                '+' => Token::Plus,
+                '-' => Token::Minus,
+                '*' => Token::Asterisk,
+                '/' => Token::Slash,
+                '^' => Token::Caret,
+                '%' => Token::Percent,
+                '!' => Token::Exclamation,
+                '?' => Token::Question,
+                ',' => Token::Comma,
+                ';' => Token::Semicolon,
+                '(' => Token::OpenParen,
+                ')' => Token::CloseParen,
+                _ => return None,
+            })
+        })?;
+        // Handle two-character tokens, e.g. !=.
+        token = match token {
+            Token::Exclamation if self.next_is('=') => Token::NotEqual,
+            Token::GreaterThan if self.next_is('=') => Token::GreaterThanOrEqual,
+            Token::LessThan if self.next_is('>') => Token::LessOrGreaterThan,
+            Token::LessThan if self.next_is('=') => Token::LessThanOrEqual,
+            token => token,
+        };
+        Some(token)
+    }
+
+    fn next_if_map<T>(&mut self, map: impl Fn(char) -> Option<T>) -> Option<T> {
+        let result = self.chars.peek().copied().and_then(map)?;
+        // consuming the next character if it was not None
+        self.chars.next();
+        Some(result)
+    }
+
     /// Scans the next number, if any.
     fn scan_number(&mut self) -> Option<Token> {
         // Scan the integer part. There must be one digit.
@@ -415,4 +469,15 @@ impl<'a> Lexer<'a> {
     fn skip_whitespace(&mut self) {
         while self.next_if(|c| c.is_whitespace()).is_some() {}
     }
+}
+
+
+/// Returns true if the entire given string is a single valid identifier.
+pub fn is_ident(ident: &str) -> bool {
+    let mut lexer = Lexer::new(ident);
+    let Some(Ok(Token::Ident(_))) = lexer.next() else {
+        return false;
+    };
+
+    return lexer.next().is_none();
 }
