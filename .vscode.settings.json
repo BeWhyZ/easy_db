@@ -1,0 +1,91 @@
+{
+  "indentRainbow.indicatorStyle": "light",
+    "indentRainbow.lightIndicatorStyleLineWidth": 2,
+    "editor.guides.bracketPairs": true,
+    "rust-analyzer.completion.autoimport.enable": true,
+
+    "vim.searchHighlightColor": "#5f00af",
+    "files.autoSave": "onFocusChange",
+    "editor.renderWhitespace": "boundary",
+    "editor.detectIndentation": false,
+    "editor.minimap.enabled": false,
+    "editor.lineNumbers": "relative",
+    "editor.parameterHints.enabled": false,
+    // 绑定vim前导键
+    "vim.leader": "<space>",
+    // 启用easymotion插件
+    "vim.easymotion": true,
+    "vim.surround": true,
+    // 启用系统粘贴板作为vim寄存器
+    "vim.useSystemClipboard": true,
+    // 由vim接管ctrl+any的按键，而不是vscode
+    "vim.useCtrlKeys": true,
+    // 突出显示与当前搜索匹配的所有文本
+    "vim.hlsearch": true,
+    // 普通模式下的非递归按键绑定
+    "vim.normalModeKeyBindingsNonRecursive": [
+        {
+            "before": [
+              "<C-n>"
+            ],
+            "commands": [
+              ":nohl"
+            ]
+          },
+          {
+            "before": [
+              "<leader>",
+              "g",
+              "c"
+            ],
+            "commands": [
+              "workbench.action.showCommands"
+            ]
+          },
+          { "before": ["H"], "after": ["g", "T"], },
+          { "before": ["L"], "after": ["g", "t"] },
+    ],
+    // 插入模式下的非递归按键绑定
+    "vim.insertModeKeyBindings": [
+        {
+            "before": [
+              "j",
+              "j"
+            ],
+            "after": [
+              "<Esc>"
+            ]
+          },
+    ],
+    // 命令模式下的非递归按键绑定
+    "vim.commandLineModeKeyBindingsNonRecursive": [],
+    // 可视模式下的非递归按键绑定
+    "vim.operatorPendingModeKeyBindings": [],
+    // 下面定义的按键将交由vscode进行处理，而不是vscode-vim插件
+    "vim.handleKeys": {
+        "<C-a>": false,
+        "<C-f>": false
+    },
+    "window.zoomLevel": 2,
+    "terminal.integrated.env.osx": {
+      "GOPATH": "/Users/junxiaoliu/go"
+    },
+    "explorer.confirmDelete": false,
+    "cSpell.userWords": [
+        "gorm",
+        "xorm"
+    ],
+    "editor.codeActionsOnSave": {
+    },
+    "diffEditor.ignoreTrimWhitespace": true,
+        "todo-tree.filtering.excludeGlobs": [
+          "**/dist/**",
+          "**/vendor/**"
+        ],
+        "workbench.colorCustomizations": {
+            "todo-tree.highlight.defaultBackground": "#1E1E1E",
+            "todo-tree.highlight.defaultForeground": "#D4D4D4"
+          },
+        "todo-tree.general.statusBar": "total",
+        "github.copilot.nextEditSuggestions.enabled": true,
+}
