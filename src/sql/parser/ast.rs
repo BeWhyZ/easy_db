@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use crate::sql::types::DataType;
 
 
 #[derive(Debug)]
+
 pub enum Statement {
     Begin{
         read_only: bool,
@@ -131,6 +133,20 @@ impl Eq for Literal {
 
 }
 
+impl Hash for Literal {
+
+    fn hash<H: Hasher>(&self, state:&mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {},
+            Self::Boolean(b) => b.hash(state),
+            Self::Integer(i) => i.hash(state),
+            Self::Float(f) => f.to_bits().hash(state),
+            Self::String(s) => s.hash(state),
+        }
+    }
+}
+
 
 /// ORDER BY direction.
 #[derive(Debug, Default)]
@@ -153,6 +169,7 @@ pub enum From{
         predicate: Option<Expression>,
     }
 }
+
 
 /// Expression operators.
 ///
@@ -194,4 +211,25 @@ pub enum JoinType {
     Inner,
     Left,
     Right,
+}
+
+
+impl core::convert::From<Literal> for Expression {
+    fn from(literal: Literal) -> Self {
+        Self::Literal(literal)
+    }
+
+}
+
+
+impl core::convert::From<Operator> for Expression {
+    fn from(op: Operator) -> Self {
+        Self::Operator(op)
+    }
+}
+
+impl core::convert::From<Operator> for Box<Expression> {
+    fn from(op: Operator) -> Self {
+        Box::new(op.into())
+    }
 }
