@@ -77,6 +77,7 @@ impl Display for Token {
     }
 }
 
+
 impl From<Keyword> for Token {
     fn from(keyword: Keyword) -> Self {
         Self::Keyword(keyword)

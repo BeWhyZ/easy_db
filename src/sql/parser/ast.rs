@@ -84,7 +84,7 @@ pub struct Column {
     pub default: Option<Expression>,
     pub unique: bool,
     pub index: bool,
-    pub reference: Option<String>,
+    pub references: Option<String>,
 }
 
 
