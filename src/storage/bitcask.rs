@@ -91,10 +91,7 @@ impl Engine for BitCask {
     where
         Self: Sized,
     {
-        ScanIterator {
-            inner: self.keydir.range(range),
-            log: &mut self.log,
-        }
+        ScanIterator { inner: self.keydir.range(range), log: &mut self.log }
     }
 
     fn scan_dyn(
@@ -112,20 +109,10 @@ impl Engine for BitCask {
 
     fn status(&mut self) -> Result<Status> {
         let keys = self.keydir.len() as u64;
-        let size = self
-            .keydir
-            .iter()
-            .map(|(k, vl)| (k.len() + vl.length) as u64)
-            .sum();
+        let size = self.keydir.iter().map(|(k, vl)| (k.len() + vl.length) as u64).sum();
         let disk_size = self.log.file.metadata()?.len();
         let live_disk_size = size + 8 * keys;
-        Ok(Status {
-            name: "bitcask".to_string(),
-            keys,
-            size,
-            disk_size,
-            live_disk_size,
-        })
+        Ok(Status { name: "bitcask".to_string(), keys, size, disk_size, live_disk_size })
     }
 }
 
@@ -512,11 +499,7 @@ mod tests {
                 r.read_exact(&mut len_buf)?;
                 let value_len_or_tombstone = i32::from_be_bytes(len_buf); // NB: -1 for tombstones
                 let value_len = value_len_or_tombstone.max(0) as u32;
-                writeln!(
-                    output,
-                    " valuelen={value_len_or_tombstone} [{}]",
-                    hex::encode(len_buf)
-                )?;
+                writeln!(output, " valuelen={value_len_or_tombstone} [{}]", hex::encode(len_buf))?;
 
                 let mut key = vec![0; key_len as usize];
                 r.read_exact(&mut key)?;

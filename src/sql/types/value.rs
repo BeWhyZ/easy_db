@@ -156,9 +156,7 @@ impl Value {
         use Value::*;
         Ok(match (self, other) {
             (Integer(lhs), Integer(rhs)) if *rhs >= 0 => {
-                let rhs = (*rhs)
-                    .try_into()
-                    .or_else(|_| errinput!("integer overflow"))?;
+                let rhs = (*rhs).try_into().or_else(|_| errinput!("integer overflow"))?;
                 match lhs.checked_pow(rhs) {
                     Some(i) => Integer(i),
                     None => return errinput!("integer overflow"),

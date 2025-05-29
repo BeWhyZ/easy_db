@@ -1,20 +1,17 @@
-
+use std::fmt::Display;
 use std::iter::Peekable;
 use std::str::Chars;
-use std::fmt::Display;
 
-use crate::error::Result;
 use crate::errinput;
-
+use crate::error::Result;
 
 pub struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
 }
 
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
-        /// A numeric string, with digits, decimal points, and/or exponents. Leading
+    /// A numeric string, with digits, decimal points, and/or exponents. Leading
     /// signs (e.g. -) are separate tokens.
     Number(String),
     /// A Unicode string, with quotes stripped and escape sequences resolved.
@@ -44,7 +41,6 @@ pub enum Token {
     OpenParen,          // (
     CloseParen,         // )
 }
-
 
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -77,13 +73,11 @@ impl Display for Token {
     }
 }
 
-
 impl From<Keyword> for Token {
     fn from(keyword: Keyword) -> Self {
         Self::Keyword(keyword)
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Keyword {
@@ -235,7 +229,6 @@ impl TryFrom<&str> for Keyword {
     }
 }
 
-
 impl Display for Keyword {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Display keywords as uppercase.
@@ -325,8 +318,8 @@ impl Iterator for Lexer<'_> {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input:  &'a str) -> Lexer<'a> {
-        Lexer { chars: input.chars().peekable()}
+    pub fn new(input: &'a str) -> Lexer<'a> {
+        Lexer { chars: input.chars().peekable() }
     }
 
     fn scan(&mut self) -> Result<Option<Token>> {
@@ -421,7 +414,6 @@ impl<'a> Lexer<'a> {
         Some(Token::Number(number))
     }
 
-    
     /// Scans the next quoted identifier, if any. Case is preserved.
     fn scan_ident_quoted(&mut self) -> Result<Option<Token>> {
         if !self.next_is('"') {
@@ -459,7 +451,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_is(&mut self, c: char) -> bool {
-        self.next_if(|n| n==c).is_some()
+        self.next_if(|n| n == c).is_some()
     }
 
     fn next_if(&mut self, predicate: impl Fn(char) -> bool) -> Option<char> {
@@ -471,7 +463,6 @@ impl<'a> Lexer<'a> {
         while self.next_if(|c| c.is_whitespace()).is_some() {}
     }
 }
-
 
 /// Returns true if the entire given string is a single valid identifier.
 pub fn is_ident(ident: &str) -> bool {

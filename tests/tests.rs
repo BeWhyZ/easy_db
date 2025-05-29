@@ -39,10 +39,7 @@ struct Runner {
 
 impl Runner {
     fn new() -> Self {
-        Self {
-            cluster: None,
-            clients: HashMap::new(),
-        }
+        Self { cluster: None, clients: HashMap::new() }
     }
 
     /// Fetches a client for the given prefix, or creates a new one.

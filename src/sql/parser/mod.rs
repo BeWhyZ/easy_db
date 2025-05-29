@@ -1,6 +1,6 @@
-mod parser;
-mod lexer;
 mod ast;
+mod lexer;
+mod parser;
 
-pub use lexer::{Keyword, Lexer, Token, is_ident};
+pub use lexer::{is_ident, Keyword, Lexer, Token};
 pub use parser::Parser;

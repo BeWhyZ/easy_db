@@ -3,11 +3,10 @@ use std::hash::{Hash, Hasher};
 
 use crate::sql::types::DataType;
 
-
 #[derive(Debug)]
 
 pub enum Statement {
-    Begin{
+    Begin {
         read_only: bool,
         as_of: Option<u64>,
     },
@@ -87,12 +86,10 @@ pub struct Column {
     pub references: Option<String>,
 }
 
-
-
 /// SQL expressions, e.g. `a + 7 > b`. Can be nested.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Expression {
-        /// All columns, i.e. *.
+    /// All columns, i.e. *.
     All,
     /// A column reference, optionally qualified with a table name.
     Column(Option<String>, String),
@@ -103,7 +100,6 @@ pub enum Expression {
     /// An operator.
     Operator(Operator),
 }
-
 
 #[derive(Clone, Debug)]
 pub enum Literal {
@@ -124,21 +120,16 @@ impl PartialEq for Literal {
             (Self::String(a), Self::String(b)) => a == b,
             (_, _) => false,
         }
-
     }
 }
 
-
-impl Eq for Literal {
-
-}
+impl Eq for Literal {}
 
 impl Hash for Literal {
-
-    fn hash<H: Hasher>(&self, state:&mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         core::mem::discriminant(self).hash(state);
         match self {
-            Self::Null => {},
+            Self::Null => {}
             Self::Boolean(b) => b.hash(state),
             Self::Integer(i) => i.hash(state),
             Self::Float(f) => f.to_bits().hash(state),
@@ -146,7 +137,6 @@ impl Hash for Literal {
         }
     }
 }
-
 
 /// ORDER BY direction.
 #[derive(Debug, Default)]
@@ -157,19 +147,10 @@ pub enum Direction {
 }
 
 #[derive(Debug)]
-pub enum From{
-    Table {
-        name: String,
-        alias: Option<String>,
-    },
-    Join {
-        left: Box<From>,
-        right: Box<From>,
-        r#type: JoinType,
-        predicate: Option<Expression>,
-    }
+pub enum From {
+    Table { name: String, alias: Option<String> },
+    Join { left: Box<From>, right: Box<From>, r#type: JoinType, predicate: Option<Expression> },
 }
-
 
 /// Expression operators.
 ///
@@ -203,7 +184,6 @@ pub enum Operator {
     Like(Box<Expression>, Box<Expression>), // a LIKE b
 }
 
-
 /// JOIN types.
 #[derive(Debug, PartialEq)]
 pub enum JoinType {
@@ -213,14 +193,11 @@ pub enum JoinType {
     Right,
 }
 
-
 impl core::convert::From<Literal> for Expression {
     fn from(literal: Literal) -> Self {
         Self::Literal(literal)
     }
-
 }
-
 
 impl core::convert::From<Operator> for Expression {
     fn from(op: Operator) -> Self {

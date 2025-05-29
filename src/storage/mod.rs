@@ -1,8 +1,8 @@
 pub mod bitcask;
 pub mod engine;
-pub mod mvcc;
 pub mod memory;
+pub mod mvcc;
 
-pub use engine::{Engine, ScanIterator, Status};
 pub use bitcask::BitCask;
+pub use engine::{Engine, ScanIterator, Status};
 pub use memory::Memory;

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 
-use crate::encoding::{self, Key as _, Value as _, bincode, keycode};
-use crate::error::{Result, Error};
+use crate::encoding::{self, bincode, keycode, Key as _, Value as _};
+use crate::error::{Error, Result};
 use crate::storage::engine::Engine;
 use crate::{errdata, errinput};
 
@@ -78,12 +78,9 @@ pub struct MVCC<E: Engine> {
     pub engine: Arc<Mutex<E>>,
 }
 
-
 impl<E: Engine> MVCC<E> {
     pub fn new(engine: E) -> Self {
-        Self {
-            engine: Arc::new(Mutex::new(engine)),
-        }
+        Self { engine: Arc::new(Mutex::new(engine)) }
     }
 
     pub fn begin(&self) -> Result<Transaction<E>> {
@@ -109,29 +106,22 @@ impl<E: Engine> MVCC<E> {
         self.engine.lock()?.get(&Key::Unversioned(key.into()).encode())
     }
 
-    pub fn set_unversioned(&self, key:&[u8], value: Vec<u8>) -> Result<()> {
+    pub fn set_unversioned(&self, key: &[u8], value: Vec<u8>) -> Result<()> {
         self.engine.lock()?.set(&Key::Unversioned(key.into()).encode(), value)
     }
 
     pub fn status(&self) -> Result<Status> {
         let mut engine = self.engine.lock()?;
-        let version = match engine.get(&Key::NextVersion.encode())?{
+        let version = match engine.get(&Key::NextVersion.encode())? {
             Some(ref v) => Version::decode(&v)? - 1,
             None => 0,
         };
         let active_txns = engine.scan_prefix(&KeyPrefix::TxnActive.encode()).count() as u64;
         let storage = engine.status()?;
 
-        Ok(Status {
-            version,
-            active_txns,
-            storage,
-        })
-
+        Ok(Status { version, active_txns, storage })
     }
-
 }
-
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Status {
@@ -181,18 +171,17 @@ impl<'a> From<&'a TransactionState> for Cow<'a, TransactionState> {
     }
 }
 
-
 impl<E: Engine> Transaction<E> {
     pub fn begin(engine: Arc<Mutex<E>>) -> Result<Self> {
         let mut session = engine.lock()?;
-        
+
         let version = match session.get(&Key::NextVersion.encode())? {
             Some(ref v) => Version::decode(&v)?,
             None => 1,
         };
 
         session.set(&Key::NextVersion.encode(), (version + 1).encode())?;
-        
+
         // Fetch the current set of active transactions, persist it for
         // time-travel queries if non-empty, then add this txn to it.
         let active = Self::scan_active(&mut session)?;
@@ -202,22 +191,13 @@ impl<E: Engine> Transaction<E> {
         session.set(&Key::TxnActive(version).encode(), vec![])?;
         drop(session);
 
-        return Ok(Self {
-            engine,
-            state: TransactionState {
-                version,
-                read_only: false,
-                active,
-            },
-        });
-
+        return Ok(Self { engine, state: TransactionState { version, read_only: false, active } });
     }
-
 
     fn scan_active(session: &mut MutexGuard<E>) -> Result<BTreeSet<Version>> {
         let mut actives = BTreeSet::new();
         let mut scan = session.scan_prefix(&KeyPrefix::TxnActive.encode());
-        while let Some((k, _)) = scan.next().transpose()?{
+        while let Some((k, _)) = scan.next().transpose()? {
             match Key::decode(&k)? {
                 Key::TxnActive(version) => actives.insert(version),
                 key => return errdata!("unexpected key type: {key:?}"),
@@ -225,7 +205,6 @@ impl<E: Engine> Transaction<E> {
         }
 
         return Ok(actives);
-
     }
 
     /// Begins a new read-only transaction. If version is given it will see the
@@ -244,7 +223,7 @@ impl<E: Engine> Transaction<E> {
         let mut active = BTreeSet::new();
         if let Some(as_of) = as_of {
             if as_of >= version {
-                return errinput!("version {as_of} does not exist")
+                return errinput!("version {as_of} does not exist");
             }
             version = as_of;
             if let Some(value) = session.get(&Key::TxnActiveSnapshot(version).encode())? {
@@ -256,27 +235,19 @@ impl<E: Engine> Transaction<E> {
 
         drop(session);
 
-        Ok(Self {
-            engine,
-            state: TransactionState{
-                version,
-                read_only: true,
-                active,
-            },
-        })
+        Ok(Self { engine, state: TransactionState { version, read_only: true, active } })
     }
 
     fn resume(engine: Arc<Mutex<E>>, state: TransactionState) -> Result<Self> {
         // For read-write transactions, verify that the transaction is still
         // active before making further writes.
-        if !state.read_only && engine.lock()?.get(&Key::TxnActive(state.version).encode())?.is_none() {
-            return errinput!("no active transaction with version {}", state.version)
+        if !state.read_only
+            && engine.lock()?.get(&Key::TxnActive(state.version).encode())?.is_none()
+        {
+            return errinput!("no active transaction with version {}", state.version);
         }
 
-        Ok(Self {
-            engine,
-            state
-        })
+        Ok(Self { engine, state })
     }
 
     /// Returns the version the transaction is running at.
@@ -332,7 +303,7 @@ impl<E: Engine> Transaction<E> {
                 Key::TxnWrite(_, k) => {
                     rollback.push(Key::Version(k, self.state.version).encode())
                     // the version
-                },
+                }
                 _ => return errdata!("expected TxnWrite key, got {k:?}"),
             };
             rollback.push(k); // the TxnWrite record
@@ -344,9 +315,7 @@ impl<E: Engine> Transaction<E> {
         }
 
         session.delete(&Key::TxnActive(self.state.version).encode())
-
     }
-
 
     /// Deletes a key.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
@@ -371,20 +340,22 @@ impl<E: Engine> Transaction<E> {
         let from = Key::Version(
             key.into(),
             self.state.active.iter().min().copied().unwrap_or(self.state.version + 1),
-        ).encode();
+        )
+        .encode();
         let to = Key::Version(key.into(), u64::MAX).encode();
         if let Some((key, _)) = session.scan(from..=to).last().transpose()? {
             match Key::decode(&key)? {
                 Key::Version(_, version) => {
-                    if !self.state.is_visible(version){
+                    if !self.state.is_visible(version) {
                         return Err(Error::Serialization);
                     }
-                },
+                }
                 key => return errdata!("expected Version key, got {key:?}"),
             }
         }
         session.set(&Key::TxnWrite(self.state.version, key.into()).encode(), vec![])?;
-        session.set(&Key::Version(key.into(), self.state.version).encode(), bincode::serialize(&value))
+        session
+            .set(&Key::Version(key.into(), self.state.version).encode(), bincode::serialize(&value))
     }
 
     /// Fetches a key's value, or None if it does not exist.
@@ -400,7 +371,7 @@ impl<E: Engine> Transaction<E> {
                     if self.state.is_visible(version) {
                         return bincode::deserialize(&value);
                     }
-                },
+                }
                 key => return errdata!("expected Version key, got {key:?}"),
             }
         }
@@ -429,8 +400,6 @@ impl<E: Engine> Transaction<E> {
         let range = keycode::prefix_range(&prefix);
         ScanIterator::new(self.engine.clone(), self.state().clone(), range)
     }
-
-
 }
 
 /// An iterator over the latest live and visible key/value pairs for the txn.
@@ -443,7 +412,7 @@ impl<E: Engine> Transaction<E> {
 /// This does not implement DoubleEndedIterator (reverse scans), since the SQL
 /// layer doesn't currently need it.
 pub struct ScanIterator<E: Engine> {
-    engine: Arc<Mutex<E>>, 
+    engine: Arc<Mutex<E>>,
     txn: TransactionState,
     buffer: VecDeque<(Vec<u8>, Vec<u8>)>,
 
@@ -462,11 +431,14 @@ impl<E: Engine> Clone for ScanIterator<E> {
     }
 }
 
-
 impl<E: Engine> ScanIterator<E> {
-    const BUFFER_SIZE: usize = if cfg!(test) {2} else { 32};
+    const BUFFER_SIZE: usize = if cfg!(test) { 2 } else { 32 };
 
-    fn new(engine: Arc<Mutex<E>>, txn: TransactionState, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Self {
+    fn new(
+        engine: Arc<Mutex<E>>,
+        txn: TransactionState,
+        range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> Self {
         Self {
             engine,
             txn,
@@ -489,9 +461,9 @@ impl<E: Engine> ScanIterator<E> {
         let mut iter = VersionIterator::new(&self.txn, engine.scan(range)).peekable();
         while let Some((key, _, value)) = iter.next().transpose()? {
             match iter.peek() {
-                Some(Ok((next, _, _,) )) if next == &key => continue,
+                Some(Ok((next, _, _))) if next == &key => continue,
                 Some(Err(err)) => return Err(err.clone()),
-                Some(Ok(_)) | None => {},
+                Some(Ok(_)) | None => {}
             }
             let Some(value) = bincode::deserialize(&value)? else {
                 continue;
@@ -509,10 +481,9 @@ impl<E: Engine> ScanIterator<E> {
 
         Ok(())
     }
-
 }
 
-impl<E: Engine> Iterator for ScanIterator<E > {
+impl<E: Engine> Iterator for ScanIterator<E> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -526,7 +497,6 @@ impl<E: Engine> Iterator for ScanIterator<E > {
     }
 }
 
-
 pub struct VersionIterator<'a, I: engine::ScanIterator> {
     txn: &'a TransactionState,
     inner: I,
@@ -534,7 +504,7 @@ pub struct VersionIterator<'a, I: engine::ScanIterator> {
 
 impl<'a, I: engine::ScanIterator> VersionIterator<'a, I> {
     fn new(txn: &'a TransactionState, inner: I) -> Self {
-        Self { txn, inner}
+        Self { txn, inner }
     }
 
     fn try_next(&mut self) -> Result<Option<(Vec<u8>, Version, Vec<u8>)>> {
@@ -547,7 +517,6 @@ impl<'a, I: engine::ScanIterator> VersionIterator<'a, I> {
             }
 
             return Ok(Some((key.into_owned(), version, value)));
-
         }
         Ok(None)
     }
@@ -560,7 +529,6 @@ impl<I: engine::ScanIterator> Iterator for VersionIterator<'_, I> {
         self.try_next().transpose()
     }
 }
-
 
 /// Most storage tests are Goldenscripts under src/storage/testscripts.
 #[cfg(test)]
@@ -578,7 +546,7 @@ pub mod tests {
 
     use super::*;
     use crate::encoding::format::{self, Formatter as _};
-    use crate::storage::engine::test::{Emit, Mirror, Operation, decode_binary, parse_key_range};
+    use crate::storage::engine::test::{decode_binary, parse_key_range, Emit, Mirror, Operation};
     use crate::storage::{BitCask, Memory};
 
     // Run goldenscript tests in src/storage/testscripts/mvcc.
@@ -883,4 +851,3 @@ pub mod tests {
         }
     }
 }
-

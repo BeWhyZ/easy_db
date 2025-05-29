@@ -22,7 +22,6 @@ pub enum Error {
     Serialization,
 }
 
-
 impl std::error::Error for Error {}
 
 impl Display for Error {

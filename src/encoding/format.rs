@@ -1,8 +1,8 @@
 //! Decodes and formats raw keys and values, recursively as needed. Handles both
 //! both Raft, MVCC, SQL, and raw binary data.
 
-use std::marker::PhantomData;
 use std::collections::BTreeSet;
+use std::marker::PhantomData;
 
 use itertools::Itertools as _;
 
@@ -25,9 +25,7 @@ pub trait Formatter {
     /// Formats a key/value pair, where the value may not exist.
     fn key_maybe_value(key: &[u8], value: Option<&[u8]>) -> String {
         let fkey = Self::key(key);
-        let fvalue = value
-            .map(|v| Self::value(key, v))
-            .unwrap_or("None".to_string());
+        let fvalue = value.map(|v| Self::value(key, v)).unwrap_or("None".to_string());
         format!("{fkey} → {fvalue}")
     }
 }
@@ -37,11 +35,7 @@ pub struct Raw;
 
 impl Raw {
     pub fn bytes(bytes: &[u8]) -> String {
-        let escaped = bytes
-            .iter()
-            .copied()
-            .flat_map(std::ascii::escape_default)
-            .collect_vec();
+        let escaped = bytes.iter().copied().flat_map(std::ascii::escape_default).collect_vec();
         let string = String::from_utf8_lossy(&escaped);
         format!("\"{string}\"")
     }
@@ -56,7 +50,6 @@ impl Formatter for Raw {
         Self::bytes(value)
     }
 }
-
 
 pub struct MVCC<F: Formatter>(PhantomData<F>);
 
@@ -87,28 +80,28 @@ impl<F: Formatter> Formatter for MVCC<F> {
         let Ok(key) = mvcc::Key::decode(key) else {
             return Raw::bytes(value); // invalid key
         };
-       match key {
-        mvcc::Key::NextVersion => {
-            let Ok(version) = bincode::deserialize::<mvcc::Version>(value) else {
-                return Raw::bytes(value);
-            };
-            version.to_string()
-        }
+        match key {
+            mvcc::Key::NextVersion => {
+                let Ok(version) = bincode::deserialize::<mvcc::Version>(value) else {
+                    return Raw::bytes(value);
+                };
+                version.to_string()
+            }
 
-        mvcc::Key::TxnActiveSnapshot(_) => {
-            let Ok(active) = bincode::deserialize::<BTreeSet<u64>>(value) else {
-                return Raw::bytes(value);
-            };
-            format!("{{{}}}", active.iter().join(","))
-        }
+            mvcc::Key::TxnActiveSnapshot(_) => {
+                let Ok(active) = bincode::deserialize::<BTreeSet<u64>>(value) else {
+                    return Raw::bytes(value);
+                };
+                format!("{{{}}}", active.iter().join(","))
+            }
 
-        mvcc::Key::TxnActive(_) | mvcc::Key::TxnWrite(_, _) => Raw::bytes(value),
-        mvcc::Key::Version(userkey, _) => match bincode::deserialize(value) {
-            Ok(Some(value)) => F::value(&userkey, value),
-            Ok(None) => "None".to_string(),
-            Err(_) => Raw::bytes(value),
-        },
-        mvcc::Key::Unversioned(userkey) => F::value(&userkey, value),
-       }
+            mvcc::Key::TxnActive(_) | mvcc::Key::TxnWrite(_, _) => Raw::bytes(value),
+            mvcc::Key::Version(userkey, _) => match bincode::deserialize(value) {
+                Ok(Some(value)) => F::value(&userkey, value),
+                Ok(None) => "None".to_string(),
+                Err(_) => Raw::bytes(value),
+            },
+            mvcc::Key::Unversioned(userkey) => F::value(&userkey, value),
+        }
     }
 }

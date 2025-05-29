@@ -110,11 +110,7 @@ pub mod test {
                     let key = decode_binary(&args.next_pos().ok_or("key not given")?.value);
                     args.reject_rest()?;
                     let value = self.engine.get(&key)?;
-                    writeln!(
-                        output,
-                        "{}",
-                        format::Raw::key_maybe_value(&key, value.as_deref())
-                    )?;
+                    writeln!(output, "{}", format::Raw::key_maybe_value(&key, value.as_deref()))?;
                 }
 
                 // scan [reverse=BOOL] RANGE
@@ -264,10 +260,7 @@ pub mod test {
 
         fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
             self.inner.set(key, value.clone())?;
-            self.tx.send(Operation::Set {
-                key: key.to_vec(),
-                value,
-            })?;
+            self.tx.send(Operation::Set { key: key.to_vec(), value })?;
             Ok(())
         }
 
@@ -319,9 +312,7 @@ pub mod test {
         where
             Self: Sized,
         {
-            let a = self
-                .a
-                .scan((range.start_bound().cloned(), range.end_bound().cloned()));
+            let a = self.a.scan((range.start_bound().cloned(), range.end_bound().cloned()));
             let b = self.b.scan(range);
             MirrorIterator { a, b }
         }

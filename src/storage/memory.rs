@@ -1,12 +1,9 @@
-
-
 use std::collections::btree_map::Range;
 use std::collections::BTreeMap;
-use std::ops::{RangeBounds, Bound};
+use std::ops::{Bound, RangeBounds};
 
 use super::{Engine, Status};
 use crate::error::Result;
-
 
 // define memory storage
 #[derive(Default)]
@@ -22,7 +19,6 @@ impl Memory {
 impl Engine for Memory {
     type ScanIterator<'a> = ScanIterator<'a>;
 
-
     // Delete a key, or do nothing if the key does not exist.
     fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.0.remove(key);
@@ -30,7 +26,7 @@ impl Engine for Memory {
     }
 
     // flush any buffered data to disk
-    fn flush(&mut self) -> Result<()>{
+    fn flush(&mut self) -> Result<()> {
         // no-op for memory storage
         Ok(())
     }
@@ -41,20 +37,24 @@ impl Engine for Memory {
 
     fn scan(&mut self, range: impl RangeBounds<Vec<u8>>) -> Self::ScanIterator<'_>
     where
-        Self: Sized{
-            ScanIterator(self.0.range(range))
-        }
+        Self: Sized,
+    {
+        ScanIterator(self.0.range(range))
+    }
 
-    fn scan_dyn(&mut self, range: (Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Box<dyn super::ScanIterator + '_>{
+    fn scan_dyn(
+        &mut self,
+        range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> Box<dyn super::ScanIterator + '_> {
         Box::new(self.scan(range))
     }
 
-    fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()>{
+    fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
         self.0.insert(key.to_vec(), value);
         Ok(())
     }
 
-    fn status(&mut self) -> Result<Status>{
+    fn status(&mut self) -> Result<Status> {
         Ok(Status {
             name: "memory".to_string(),
             keys: self.0.len() as u64,
@@ -63,9 +63,6 @@ impl Engine for Memory {
             live_disk_size: 0,
         })
     }
-
-
-
 }
 
 // new scanIterator for scan
@@ -74,11 +71,9 @@ pub struct ScanIterator<'a>(Range<'a, Vec<u8>, Vec<u8>>);
 impl Iterator for ScanIterator<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
-
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(k,v)| { Ok((k.clone(), v.clone()))})
+        self.0.next().map(|(k, v)| Ok((k.clone(), v.clone())))
     }
-
 }
 
 impl DoubleEndedIterator for ScanIterator<'_> {
@@ -86,8 +81,6 @@ impl DoubleEndedIterator for ScanIterator<'_> {
         self.0.next_back().map(|(k, v)| Ok((k.clone(), v.clone())))
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
