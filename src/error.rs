@@ -12,7 +12,7 @@ pub enum Error {
     /// Invalid data, typically decoding errors or unexpected internal values.
     InvalidData(String),
     /// Invalid user input, typically parser or query errors.
-    InvalidInput(String),
+    InvalidInput { msg: String, file: &'static str, line: u32 },
     /// An IO error.
     IO(String),
     /// A write was attempted in a read-only transaction.
@@ -29,7 +29,9 @@ impl Display for Error {
         match self {
             Error::Abort => write!(f, "operation aborted"),
             Error::InvalidData(msg) => write!(f, "invalid data: {msg}"),
-            Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            Error::InvalidInput { msg, file, line } => {
+                write!(f, "invalid input: {msg} (at {file}:{line})")
+            }
             Error::IO(msg) => write!(f, "io error: {msg}"),
             Error::ReadOnly => write!(f, "read-only transaction"),
             Error::Serialization => write!(f, "serialization failure, retry transaction"),
@@ -53,7 +55,7 @@ impl Error {
             Error::InvalidData(_) => false,
             // Input errors are (likely) deterministic. They might not be in
             // case data was corrupted in flight, but we ignore this case.
-            Error::InvalidInput(_) => true,
+            Error::InvalidInput { .. } => true,
             // IO errors are typically local to the node (e.g. faulty disk).
             Error::IO(_) => false,
             // Write commands in read-only transactions are deterministic.
@@ -73,8 +75,13 @@ macro_rules! errdata {
 /// Constructs an Error::InvalidInput for the given format string.
 #[macro_export]
 macro_rules! errinput {
-    ($($args:tt)*) => { $crate::error::Error::InvalidInput(format!($($args)*)).into() };
-}
+    ($($args:tt)*) => {
+        $crate::error::Error::InvalidInput {
+            msg: format!($($args)*),
+            file: file!(),
+            line: line!(),
+        }.into()
+    };}
 
 /// A toyDB Result returning Error.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,7 +118,7 @@ impl From<bincode::error::EncodeError> for Error {
 
 impl From<config::ConfigError> for Error {
     fn from(err: config::ConfigError) -> Self {
-        Error::InvalidInput(err.to_string())
+        Error::InvalidInput { msg: err.to_string(), file: file!(), line: line!() }
     }
 }
 
@@ -147,13 +154,13 @@ impl From<hdrhistogram::CreationError> for Error {
 
 impl From<hdrhistogram::RecordError> for Error {
     fn from(err: hdrhistogram::RecordError) -> Self {
-        Error::InvalidInput(err.to_string())
+        Error::InvalidInput { msg: err.to_string(), file: file!(), line: line!() }
     }
 }
 
 impl From<log::ParseLevelError> for Error {
     fn from(err: log::ParseLevelError) -> Self {
-        Error::InvalidInput(err.to_string())
+        Error::InvalidInput { msg: err.to_string(), file: file!(), line: line!() }
     }
 }
 
@@ -189,13 +196,13 @@ impl From<std::io::Error> for Error {
 
 impl From<std::num::ParseFloatError> for Error {
     fn from(err: std::num::ParseFloatError) -> Self {
-        Error::InvalidInput(err.to_string())
+        Error::InvalidInput { msg: err.to_string(), file: file!(), line: line!() }
     }
 }
 
 impl From<std::num::ParseIntError> for Error {
     fn from(err: std::num::ParseIntError) -> Self {
-        Error::InvalidInput(err.to_string())
+        Error::InvalidInput { msg: err.to_string(), file: file!(), line: line!() }
     }
 }
 

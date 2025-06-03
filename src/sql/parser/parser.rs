@@ -74,6 +74,7 @@ impl Parser<'_> {
         self.expect(Keyword::Table.into())?;
 
         let name = self.next_ident()?;
+        self.expect(Token::OpenParen)?;
         let mut columns = Vec::new();
         loop {
             columns.push(self.parse_create_table_column()?);
@@ -252,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let sql = "CREATE TABLE users (id INT PRIMARY KEY, name STRING, age INT);";
+        let sql = "CREATE TABLE users (id INT PRIMARY KEY, name STRING, age INT)";
         let stmt = Parser::parse(sql).expect("Failed to parse SQL statement");
         match stmt {
             Statement::CreateTable { name, columns } => {
