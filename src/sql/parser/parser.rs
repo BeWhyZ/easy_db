@@ -1,4 +1,5 @@
 use std::iter::Peekable;
+use std::ops::Add;
 
 use super::{ast, Keyword, Lexer, Token};
 use crate::errinput;
@@ -45,7 +46,15 @@ impl Parser<'_> {
         }
     }
     fn parse_drop_table(&mut self) -> Result<ast::Statement> {
-        unimplemented!("not implemented yet")
+        self.expect(Token::Keyword(Keyword::Drop))?;
+        self.expect(Token::Keyword(Keyword::Table))?;
+        let mut if_exists = false;
+        if self.next_is(Keyword::If.into()) {
+            self.expect(Token::Keyword(Keyword::Exists))?;
+            if_exists = true;
+        }
+        let name = self.next_ident()?;
+        Ok(ast::Statement::DropTable { name, if_exists })
     }
 
     fn parse_delete(&mut self) -> Result<ast::Statement> {
@@ -89,7 +98,7 @@ impl Parser<'_> {
     fn parse_create_table_column(&mut self) -> Result<ast::Column> {
         let name = self.next_ident()?;
 
-        let data_type = match self.next()? {
+        let datatype = match self.next()? {
             Token::Keyword(Keyword::Bool | Keyword::Boolean) => DataType::Boolean,
             Token::Keyword(Keyword::Float | Keyword::Double) => DataType::Float,
             Token::Keyword(Keyword::Int | Keyword::Integer) => DataType::Integer,
@@ -98,7 +107,7 @@ impl Parser<'_> {
         };
         let mut column = ast::Column {
             name,
-            data_type,
+            datatype,
             primary_key: false,
             nullable: None,
             default: None,
@@ -117,6 +126,7 @@ impl Parser<'_> {
                     if column.nullable.is_some() {
                         return errinput!("column {} has multiple NULL constraints", column.name);
                     }
+                    column.nullable = Some(true);
                 }
                 Keyword::Not => {
                     self.expect(Keyword::Null.into())?;
@@ -140,16 +150,163 @@ impl Parser<'_> {
     }
 
     fn parse_expression(&mut self) -> Result<ast::Expression> {
-        unimplemented!("Expression parsing is not implemented yet");
+        return self.parse_expression_at(0);
+    }
+    fn parse_expression_at(&mut self, min_precedence: Precedence) -> Result<ast::Expression> {
+        let mut lhs = if let Some(prefix) = self.parse_prefix_operator_at(min_precedence) {
+            let next_precedence = prefix.precedence() + prefix.associativity();
+            let rhs = self.parse_expression_at(next_precedence)?;
+            prefix.into_expression(rhs)
+        } else {
+            self.parse_expression_atom()?
+        };
+
+        while let Some(postfix) = self.parse_postfix_operator_at(min_precedence)? {
+            lhs = postfix.into_expression(lhs)
+        }
+
+        // Repeatedly apply any infix operators to the left-hand side as long as
+        // their precedence is greater than or equal to the current minimum
+        // precedence (i.e. that of the upstack operator).
+        //
+        // The right-hand side expression parsing will recursively apply any
+        // infix operators at or above this operator's precedence to the
+        // right-hand side.
+        while let Some(infix) = self.parse_infix_operator_at(min_precedence) {
+            let next_precedence = infix.precedence() + infix.associativity();
+            let rhs = self.parse_expression_at(next_precedence)?;
+            lhs = infix.into_expression(lhs, rhs);
+        }
+
+        while let Some(postfix) = self.parse_postfix_operator_at(min_precedence)? {
+            lhs = postfix.into_expression(lhs)
+        }
+
+        Ok(lhs)
+    }
+    /// Parses a prefix operator, if there is one and its precedence is at least
+    /// min_precedence.
+    fn parse_prefix_operator_at(&mut self, min_precedence: Precedence) -> Option<PrefixOperator> {
+        self.next_if_map(|token| {
+            let operator = match token {
+                Token::Minus => PrefixOperator::Minus,
+                Token::Keyword(Keyword::Not) => PrefixOperator::Not,
+                Token::Plus => PrefixOperator::Plus,
+                _ => return None,
+            };
+            Some(operator).filter(|op| op.precedence() >= min_precedence)
+        })
+    }
+
+    fn parse_postfix_operator_at(
+        &mut self,
+        min_precedence: Precedence,
+    ) -> Result<Option<PostfixOperator>> {
+        if self.peek()? == Some(&Token::Keyword(Keyword::Is)) {
+            if PostfixOperator::Is(ast::Literal::Null).precedence() < min_precedence {
+                return Ok(None);
+            }
+            self.expect(Keyword::Is.into())?;
+            let not = self.next_is(Keyword::Not.into());
+            let value = match self.next()? {
+                Token::Keyword(Keyword::NaN) => ast::Literal::Float(f64::NAN),
+                Token::Keyword(Keyword::Null) => ast::Literal::Null,
+                token => return errinput!("unexpected token {token}"),
+            };
+            let operator = match not {
+                false => PostfixOperator::Is(value),
+                true => PostfixOperator::IsNot(value),
+            };
+            return Ok(Some(operator));
+        }
+        Ok(self.next_if_map(|token| {
+            let operator = match token {
+                Token::Exclamation => PostfixOperator::Factorial,
+                _ => return None,
+            };
+            Some(operator).filter(|op| op.precedence() >= min_precedence)
+        }))
+    }
+
+    fn parse_infix_operator_at(&mut self, min_precedence: Precedence) -> Option<InfixOperator> {
+        self.next_if_map(|token| {
+            let operator = match token {
+                Token::Asterisk => InfixOperator::Multiply,
+                Token::Caret => InfixOperator::Exponentiate,
+                Token::Equal => InfixOperator::Equal,
+                Token::GreaterThan => InfixOperator::GreaterThan,
+                Token::GreaterThanOrEqual => InfixOperator::GreaterThanOrEqual,
+                Token::Keyword(Keyword::And) => InfixOperator::And,
+                Token::Keyword(Keyword::Like) => InfixOperator::Like,
+                Token::Keyword(Keyword::Or) => InfixOperator::Or,
+                Token::LessOrGreaterThan => InfixOperator::NotEqual,
+                Token::LessThan => InfixOperator::LessThan,
+                Token::LessThanOrEqual => InfixOperator::LessThanOrEqual,
+                Token::Minus => InfixOperator::Subtract,
+                Token::NotEqual => InfixOperator::NotEqual,
+                Token::Percent => InfixOperator::Remainder,
+                Token::Plus => InfixOperator::Add,
+                Token::Slash => InfixOperator::Divide,
+                _ => return None,
+            };
+            Some(operator).filter(|op| op.precedence() >= min_precedence)
+        })
     }
 
     fn next_if_keyword(&mut self) -> Option<Keyword> {
         self.next_if_map(|token| match token {
             Token::Keyword(keyword) => Some(*keyword),
-            token => None,
+            _ => None,
         })
     }
+    /// Parses an expression atom. This is either:
+    ///
+    /// * A literal value.
+    /// * A column name.
+    /// * A function call.
+    /// * A parenthesized expression.
+    fn parse_expression_atom(&mut self) -> Result<ast::Expression> {
+        Ok(match self.next()? {
+            Token::Asterisk => ast::Expression::All,
+            Token::Number(n) if n.chars().all(|c| c.is_ascii_alphabetic()) => {
+                ast::Literal::Integer(n.parse()?).into()
+            }
+            Token::Number(n) => ast::Literal::Float(n.parse()?).into(),
+            Token::String(s) => ast::Literal::String(s).into(),
+            Token::Keyword(Keyword::True) => ast::Literal::Boolean(true).into(),
+            Token::Keyword(Keyword::False) => ast::Literal::Boolean(false).into(),
+            Token::Keyword(Keyword::Infinity) => ast::Literal::Float(f64::INFINITY).into(),
+            Token::Keyword(Keyword::NaN) => ast::Literal::Float(f64::NAN).into(),
+            Token::Keyword(Keyword::Null) => ast::Literal::Null.into(),
 
+            // function call
+            Token::Ident(name) if self.next_is(Token::OpenParen) => {
+                let mut args = Vec::new();
+                while !self.next_is(Token::CloseParen) {
+                    if !args.is_empty() {
+                        self.expect(Token::Comma)?;
+                    }
+                    args.push(self.parse_expression()?);
+                }
+                ast::Expression::Function(name, args)
+            }
+
+            // column name, either qualified as table.column or unqualified.
+            Token::Ident(table) if self.next_is(Token::Period) => {
+                ast::Expression::Column(Some(table), self.next_ident()?)
+            }
+            Token::Ident(column) => ast::Expression::Column(None, column),
+
+            // parenthesized expression.
+            Token::OpenParen => {
+                let expr = self.parse_expression()?;
+                self.expect(Token::CloseParen)?;
+                expr
+            }
+
+            token => return errinput!("expected expression atom, found {token}"),
+        })
+    }
     fn next_if_map<T>(&mut self, f: impl Fn(&Token) -> Option<T>) -> Option<T> {
         self.peek().ok()?.map(f)?.inspect(|_| drop(self.next()))
     }
@@ -245,6 +402,140 @@ impl Parser<'_> {
     }
 }
 
+type Precedence = u8;
+
+enum PrefixOperator {
+    Minus,
+    Not,
+    Plus,
+}
+
+impl PrefixOperator {
+    fn precedence(&self) -> Precedence {
+        match self {
+            Self::Not => 3,
+            Self::Minus | Self::Plus => 10,
+        }
+    }
+
+    fn associativity(&self) -> Associativity {
+        Associativity::Right
+    }
+
+    fn into_expression(self, rhs: ast::Expression) -> ast::Expression {
+        let rhs = Box::new(rhs);
+        match self {
+            Self::Plus => ast::Operator::Identity(rhs).into(),
+            Self::Minus => ast::Operator::Negate(rhs).into(),
+            Self::Not => ast::Operator::Not(rhs).into(),
+        }
+    }
+}
+
+enum InfixOperator {
+    Add,
+    And,
+    Divide,             // a / b
+    Equal,              // a = b
+    Exponentiate,       // a ^ b
+    GreaterThan,        // a > b
+    GreaterThanOrEqual, // a >= b
+    LessThan,           // a < b
+    LessThanOrEqual,    // a <= b
+    Like,               // a LIKE b
+    Multiply,           // a * b
+    NotEqual,           // a != b
+    Or,                 // a OR b
+    Remainder,          // a % b
+    Subtract,           // a - b
+}
+
+impl InfixOperator {
+    fn precedence(&self) -> Precedence {
+        match self {
+            Self::Or => 1,
+            Self::And => 2,
+            // Self::Not => 3
+            Self::Equal | Self::NotEqual | Self::Like => 4, // also Self::Is
+            Self::GreaterThan
+            | Self::GreaterThanOrEqual
+            | Self::LessThan
+            | Self::LessThanOrEqual => 5,
+            Self::Add | Self::Subtract => 6,
+            Self::Multiply | Self::Divide | Self::Remainder => 7,
+            Self::Exponentiate => 8,
+        }
+    }
+
+    fn associativity(&self) -> Associativity {
+        match self {
+            Self::Exponentiate => Associativity::Right,
+            _ => Associativity::Left,
+        }
+    }
+
+    fn into_expression(self, lhs: ast::Expression, rhs: ast::Expression) -> ast::Expression {
+        let (lhs, rhs) = (Box::new(lhs), Box::new(rhs));
+        match self {
+            Self::Add => ast::Operator::Add(lhs, rhs).into(),
+            Self::And => ast::Operator::And(lhs, rhs).into(),
+            Self::Divide => ast::Operator::Divide(lhs, rhs).into(),
+            Self::Equal => ast::Operator::Equal(lhs, rhs).into(),
+            Self::Exponentiate => ast::Operator::Exponentiate(lhs, rhs).into(),
+            Self::GreaterThan => ast::Operator::GreaterThan(lhs, rhs).into(),
+            Self::GreaterThanOrEqual => ast::Operator::GreaterThanOrEqual(lhs, rhs).into(),
+            Self::LessThan => ast::Operator::LessThan(lhs, rhs).into(),
+            Self::LessThanOrEqual => ast::Operator::LessThanOrEqual(lhs, rhs).into(),
+            Self::Like => ast::Operator::Like(lhs, rhs).into(),
+            Self::Multiply => ast::Operator::Multiply(lhs, rhs).into(),
+            Self::NotEqual => ast::Operator::NotEqual(lhs, rhs).into(),
+            Self::Or => ast::Operator::Or(lhs, rhs).into(),
+            Self::Remainder => ast::Operator::Remainder(lhs, rhs).into(),
+            Self::Subtract => ast::Operator::Subtract(lhs, rhs).into(),
+        }
+    }
+}
+
+enum PostfixOperator {
+    Factorial,
+    Is(ast::Literal),
+    IsNot(ast::Literal),
+}
+
+impl PostfixOperator {
+    fn precedence(&self) -> Precedence {
+        match self {
+            Self::Is(_) | Self::IsNot(_) => 4,
+            Self::Factorial => 9,
+        }
+    }
+
+    fn into_expression(self, lhs: ast::Expression) -> ast::Expression {
+        let lhs = Box::new(lhs);
+        match self {
+            Self::Factorial => ast::Operator::Factorial(lhs).into(),
+            Self::Is(v) => ast::Operator::Is(lhs, v).into(),
+            Self::IsNot(v) => ast::Operator::Not(ast::Operator::Is(lhs, v).into()).into(),
+        }
+    }
+}
+
+enum Associativity {
+    Left,
+    Right,
+}
+
+impl Add<Associativity> for Precedence {
+    type Output = Self;
+
+    fn add(self, rhs: Associativity) -> Self::Output {
+        self + match rhs {
+            Associativity::Left => 1,
+            Associativity::Right => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,20 +545,54 @@ mod tests {
     #[test]
     fn test_parse_create_table() {
         let sql = "CREATE TABLE users (id INT PRIMARY KEY, name STRING, age INT)";
+        println!("Testing SQL: {}", sql);
         let stmt = Parser::parse(sql).expect("Failed to parse SQL statement");
+        println!("Parsed statement: {:?}", stmt);
         match stmt {
             Statement::CreateTable { name, columns } => {
+                println!("Successfully matched CreateTable");
                 assert_eq!(name, "users");
                 assert_eq!(columns.len(), 3);
                 assert_eq!(columns[0].name, "id");
-                assert_eq!(columns[0].data_type, DataType::Integer);
+                assert_eq!(columns[0].datatype, DataType::Integer);
                 assert!(columns[0].primary_key);
                 assert_eq!(columns[1].name, "name");
-                assert_eq!(columns[1].data_type, DataType::String);
+                assert_eq!(columns[1].datatype, DataType::String);
                 assert_eq!(columns[2].name, "age");
-                assert_eq!(columns[2].data_type, DataType::Integer);
+                assert_eq!(columns[2].datatype, DataType::Integer);
             }
-            _ => panic!("Expected CreateTable statement"),
+            _ => panic!("Expected CreateTable statement, got: {:?}", stmt),
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_table() {
+        // Test basic DROP TABLE
+        let sql = "DROP TABLE users";
+        println!("Testing SQL: {}", sql);
+        let stmt = Parser::parse(sql).expect("Failed to parse SQL statement");
+        println!("Parsed statement: {:?}", stmt);
+        match stmt {
+            Statement::DropTable { name, if_exists } => {
+                println!("Successfully matched DropTable");
+                assert_eq!(name, "users");
+                assert!(!if_exists);
+            }
+            _ => panic!("Expected DropTable statement, got: {:?}", stmt),
+        }
+
+        // Test DROP TABLE IF EXISTS
+        let sql = "DROP TABLE IF EXISTS users";
+        println!("Testing SQL: {}", sql);
+        let stmt = Parser::parse(sql).expect("Failed to parse SQL statement");
+        println!("Parsed statement: {:?}", stmt);
+        match stmt {
+            Statement::DropTable { name, if_exists } => {
+                println!("Successfully matched DropTable");
+                assert_eq!(name, "users");
+                assert!(if_exists);
+            }
+            _ => panic!("Expected DropTable statement, got: {:?}", stmt),
         }
     }
 }

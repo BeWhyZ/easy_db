@@ -5,10 +5,14 @@ use std::str::Chars;
 use crate::errinput;
 use crate::error::Result;
 
-pub struct Lexer<'a> {
-    chars: Peekable<Chars<'a>>,
-}
-
+/// A lexical token.
+///
+/// These carry owned String clones rather than &str references into the
+/// original input string, because the lexer may need to modify the string (e.g.
+/// to parse escaped quotes in strings, lowercase identifiers, etc). We could
+/// use `Cow<str>` to avoid this in the common case, but we'll end up using
+/// owned strings in the final parsed AST anyway to avoid propagating these
+/// lifetimes throughout the entire SQL execution engine, so we keep it simple.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     /// A numeric string, with digits, decimal points, and/or exponents. Leading
@@ -16,7 +20,7 @@ pub enum Token {
     Number(String),
     /// A Unicode string, with quotes stripped and escape sequences resolved.
     String(String),
-    /// An identifier, with any quotes stripped.
+    /// An identifier, with any quotes stripped. Lowercased if not quoted.
     Ident(String),
     /// A SQL keyword.
     Keyword(Keyword),
@@ -79,6 +83,7 @@ impl From<Keyword> for Token {
     }
 }
 
+/// Reserved SQL keywords.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Keyword {
     And,
@@ -150,7 +155,7 @@ pub enum Keyword {
 }
 
 impl TryFrom<&str> for Keyword {
-    // Use a cheap static string, since this just indicates it's not a keyword.
+    // Use a cheap static error string. This just indicates it's not a keyword.
     type Error = &'static str;
 
     fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
@@ -303,6 +308,15 @@ impl Display for Keyword {
     }
 }
 
+/// The lexer (lexical analyzer) preprocesses raw SQL strings into a sequence of
+/// lexical tokens (e.g. keyword, number, string, etc), which are passed on to
+/// the SQL parser. In doing so, it strips away basic syntactic noise such as
+/// whitespace, case, and quotes, and performs initial symbol validation.
+pub struct Lexer<'a> {
+    chars: Peekable<Chars<'a>>,
+}
+
+/// The lexer is used as a token iterator.
 impl Iterator for Lexer<'_> {
     type Item = Result<Token>;
 
@@ -310,7 +324,6 @@ impl Iterator for Lexer<'_> {
         match self.scan() {
             Ok(Some(token)) => Some(Ok(token)),
             // If there's any remaining chars, the lexer didn't recognize them.
-            // Otherwise, we're done lexing.
             Ok(None) => self.chars.peek().map(|c| errinput!("unexpected character {c}")),
             Err(err) => Some(Err(err)),
         }
@@ -318,21 +331,49 @@ impl Iterator for Lexer<'_> {
 }
 
 impl<'a> Lexer<'a> {
+    /// Creates a new lexer for the given string.
     pub fn new(input: &'a str) -> Lexer<'a> {
         Lexer { chars: input.chars().peekable() }
     }
 
+    /// Returns the next character if it satisfies the predicate.
+    fn next_if(&mut self, predicate: impl Fn(char) -> bool) -> Option<char> {
+        self.chars.peek().filter(|&&c| predicate(c))?;
+        self.chars.next()
+    }
+
+    /// Applies a closure to the next character, returning its result and
+    /// consuming the next character if it's Some.
+    fn next_if_map<T>(&mut self, map: impl Fn(char) -> Option<T>) -> Option<T> {
+        let value = self.chars.peek().copied().and_then(map)?;
+        self.chars.next();
+        Some(value)
+    }
+
+    /// Returns true if the next character is the given character, consuming it.
+    fn next_is(&mut self, c: char) -> bool {
+        self.next_if(|n| n == c).is_some()
+    }
+
+    /// Scans the next token, if any.
     fn scan(&mut self) -> Result<Option<Token>> {
+        // Ignore whitespace.
         self.skip_whitespace();
-        match self.chars.peek() {
-            Some('\'') => self.scan_string(),
-            Some('"') => self.scan_ident_quoted(),
-            Some(c) if c.is_ascii_digit() => Ok(self.scan_number()),
-            Some(c) if c.is_alphabetic() => Ok(self.scan_ident_or_keyword()),
-            Some(_) => Ok(self.scan_symbol()),
-            None => Ok(None),
+        let Some(c) = self.chars.peek() else {
+            return Ok(None);
+        };
+        // The first character tells us the token kind. Scan it accordingly.
+        match c {
+            '\'' => self.scan_string(),
+            '"' => self.scan_ident_quoted(),
+            '0'..='9' => Ok(self.scan_number()),
+            c if c.is_alphabetic() => Ok(self.scan_ident_or_keyword()),
+            _ => Ok(self.scan_symbol()),
         }
     }
+
+    /// Scans the next identifier or keyword, if any. It's converted to
+    /// lowercase, by SQL convention.
     fn scan_ident_or_keyword(&mut self) -> Option<Token> {
         // The first character must be alphabetic. The rest can be numeric.
         let mut name = self.next_if(|c| c.is_alphabetic())?.to_lowercase().to_string();
@@ -344,6 +385,69 @@ impl<'a> Lexer<'a> {
             return Some(Token::Keyword(keyword));
         }
         Some(Token::Ident(name))
+    }
+
+    /// Scans the next quoted identifier, if any. Case is preserved.
+    fn scan_ident_quoted(&mut self) -> Result<Option<Token>> {
+        if !self.next_is('"') {
+            return Ok(None);
+        }
+        let mut ident = String::new();
+        loop {
+            match self.chars.next() {
+                // "" is the escape sequence for ".
+                Some('"') if self.next_is('"') => ident.push('"'),
+                Some('"') => break,
+                Some(c) => ident.push(c),
+                None => return errinput!("unexpected end of quoted identifier"),
+            }
+        }
+        Ok(Some(Token::Ident(ident)))
+    }
+
+    /// Scans the next number, if any.
+    fn scan_number(&mut self) -> Option<Token> {
+        // Scan the integer part. There must be at least one digit.
+        let mut number = self.next_if(|c| c.is_ascii_digit())?.to_string();
+        while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
+            number.push(c)
+        }
+        // Scan the fractional part, if any.
+        if self.next_is('.') {
+            number.push('.');
+            while let Some(dec) = self.next_if(|c| c.is_ascii_digit()) {
+                number.push(dec)
+            }
+        }
+        // Scan the exponent, if any.
+        if let Some(exp) = self.next_if(|c| c == 'e' || c == 'E') {
+            number.push(exp);
+            if let Some(sign) = self.next_if(|c| c == '+' || c == '-') {
+                number.push(sign)
+            }
+            while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
+                number.push(c)
+            }
+        }
+        Some(Token::Number(number))
+    }
+
+    /// Scans the next quoted string literal, if any.
+    fn scan_string(&mut self) -> Result<Option<Token>> {
+        if !self.next_is('\'') {
+            return Ok(None);
+        }
+        let mut string = String::new();
+        loop {
+            match self.chars.next() {
+                // '' is the escape sequence for '.
+                Some('\'') if self.next_is('\'') => string.push('\''),
+                Some('\'') => break,
+                Some(c) => string.push(c),
+                None => return errinput!("unexpected end of string literal"),
+            }
+        }
+        Ok(Some(Token::String(string)))
     }
 
     /// Scans the next symbol token, if any.
@@ -380,85 +484,7 @@ impl<'a> Lexer<'a> {
         Some(token)
     }
 
-    fn next_if_map<T>(&mut self, map: impl Fn(char) -> Option<T>) -> Option<T> {
-        let result = self.chars.peek().copied().and_then(map)?;
-        // consuming the next character if it was not None
-        self.chars.next();
-        Some(result)
-    }
-
-    /// Scans the next number, if any.
-    fn scan_number(&mut self) -> Option<Token> {
-        // Scan the integer part. There must be one digit.
-        let mut number = self.next_if(|c| c.is_ascii_digit())?.to_string();
-        while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
-            number.push(c)
-        }
-        // Scan the fractional part, if any.
-        if self.next_is('.') {
-            number.push('.');
-            while let Some(dec) = self.next_if(|c| c.is_ascii_digit()) {
-                number.push(dec)
-            }
-        }
-        // Scan the exponent, if any.
-        if let Some(exp) = self.next_if(|c| c == 'e' || c == 'E') {
-            number.push(exp);
-            if let Some(sign) = self.next_if(|c| c == '+' || c == '-') {
-                number.push(sign)
-            }
-            while let Some(c) = self.next_if(|c| c.is_ascii_digit()) {
-                number.push(c)
-            }
-        }
-        Some(Token::Number(number))
-    }
-
-    /// Scans the next quoted identifier, if any. Case is preserved.
-    fn scan_ident_quoted(&mut self) -> Result<Option<Token>> {
-        if !self.next_is('"') {
-            return Ok(None);
-        }
-        let mut ident = String::new();
-        loop {
-            match self.chars.next() {
-                // "" is the escape sequence for ".
-                Some('"') if self.next_is('"') => ident.push('"'),
-                Some('"') => break,
-                Some(c) => ident.push(c),
-                None => return errinput!("unexpected end of quoted identifier"),
-            }
-        }
-        Ok(Some(Token::Ident(ident)))
-    }
-
-    /// Scans the next quoted string literal, if any.
-    fn scan_string(&mut self) -> Result<Option<Token>> {
-        if !self.next_is('\'') {
-            return Ok(None);
-        }
-        let mut string = String::new();
-        loop {
-            match self.chars.next() {
-                // '' is the escape sequence for '.
-                Some('\'') if self.next_is('\'') => string.push('\''),
-                Some('\'') => break,
-                Some(c) => string.push(c),
-                None => return errinput!("unexpected end of string literal"),
-            }
-        }
-        Ok(Some(Token::String(string)))
-    }
-
-    fn next_is(&mut self, c: char) -> bool {
-        self.next_if(|n| n == c).is_some()
-    }
-
-    fn next_if(&mut self, predicate: impl Fn(char) -> bool) -> Option<char> {
-        self.chars.peek().filter(|&&c| predicate(c))?;
-        self.chars.next()
-    }
-
+    /// Skips any whitespace.
     fn skip_whitespace(&mut self) {
         while self.next_if(|c| c.is_whitespace()).is_some() {}
     }
@@ -470,6 +496,5 @@ pub fn is_ident(ident: &str) -> bool {
     let Some(Ok(Token::Ident(_))) = lexer.next() else {
         return false;
     };
-
-    return lexer.next().is_none();
+    lexer.next().is_none() // if further tokens, it's not a lone identifier
 }

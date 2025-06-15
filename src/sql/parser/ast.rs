@@ -3,11 +3,18 @@ use std::hash::{Hash, Hasher};
 
 use crate::sql::types::DataType;
 
+/// SQL statements are represented as an Abstract Syntax Tree (AST). The
+/// statement is the root node of this tree, and describes the syntactic
+/// structure of a SQL statement. It is built from a raw SQL string by the
+/// parser, and passed on to the planner which validates it and builds an
+/// execution plan from it.
 #[derive(Debug)]
-
 pub enum Statement {
+    /// BEGIN: begins a new transaction.
     Begin {
+        /// READ ONLY: if true, begin a read-only transaction.
         read_only: bool,
+        /// AS OF: if given, the MVCC version to read at.
         as_of: Option<u64>,
     },
     /// COMMIT: commits a transaction.
@@ -73,17 +80,68 @@ pub enum Statement {
     },
 }
 
+/// A FROM item.
+#[derive(Debug)]
+pub enum From {
+    /// A table.
+    Table {
+        /// The table name.
+        name: String,
+        /// An optional alias for the table.
+        alias: Option<String>,
+    },
+    /// A join of two or more tables (may be nested).
+    Join {
+        /// The left table to join,
+        left: Box<From>,
+        /// The right table to join.
+        right: Box<From>,
+        /// The join type.
+        r#type: JoinType,
+        /// The join condition. None for a cross join.
+        predicate: Option<Expression>,
+    },
+}
+
 /// A CREATE TABLE column definition.
 #[derive(Debug)]
 pub struct Column {
     pub name: String,
-    pub data_type: DataType,
+    pub datatype: DataType,
     pub primary_key: bool,
     pub nullable: Option<bool>,
     pub default: Option<Expression>,
     pub unique: bool,
     pub index: bool,
     pub references: Option<String>,
+}
+
+/// JOIN types.
+#[derive(Debug, PartialEq)]
+pub enum JoinType {
+    Cross,
+    Inner,
+    Left,
+    Right,
+}
+
+impl JoinType {
+    // If true, the join is an outer join, where rows with no join matches are
+    // emitted with a NULL match.
+    pub fn is_outer(&self) -> bool {
+        match self {
+            Self::Left | Self::Right => true,
+            Self::Cross | Self::Inner => false,
+        }
+    }
+}
+
+/// ORDER BY direction.
+#[derive(Debug, Default)]
+pub enum Direction {
+    #[default]
+    Ascending,
+    Descending,
 }
 
 /// SQL expressions, e.g. `a + 7 > b`. Can be nested.
@@ -101,6 +159,7 @@ pub enum Expression {
     Operator(Operator),
 }
 
+/// Expression literal values.
 #[derive(Clone, Debug)]
 pub enum Literal {
     Null,
@@ -110,14 +169,18 @@ pub enum Literal {
     String(String),
 }
 
+/// To allow using expressions and literals in e.g. hashmaps, implement simple
+/// equality by value for all types, including Null and f64::NAN. This only
+/// checks that the values are the same, and ignores SQL semantics for e.g. NULL
+/// and NaN (which is handled by SQL expression evaluation).
 impl PartialEq for Literal {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Null, Self::Null) => true,
-            (Self::Boolean(a), Self::Boolean(b)) => a == b,
-            (Self::Integer(a), Self::Integer(b)) => a == b,
-            (Self::Float(a), Self::Float(b)) => a == b,
-            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Boolean(l), Self::Boolean(r)) => l == r,
+            (Self::Integer(l), Self::Integer(r)) => l == r,
+            (Self::Float(l), Self::Float(r)) => l.to_bits() == r.to_bits(),
+            (Self::String(l), Self::String(r)) => l == r,
             (_, _) => false,
         }
     }
@@ -130,26 +193,12 @@ impl Hash for Literal {
         core::mem::discriminant(self).hash(state);
         match self {
             Self::Null => {}
-            Self::Boolean(b) => b.hash(state),
-            Self::Integer(i) => i.hash(state),
-            Self::Float(f) => f.to_bits().hash(state),
-            Self::String(s) => s.hash(state),
+            Self::Boolean(v) => v.hash(state),
+            Self::Integer(v) => v.hash(state),
+            Self::Float(v) => v.to_bits().hash(state),
+            Self::String(v) => v.hash(state),
         }
     }
-}
-
-/// ORDER BY direction.
-#[derive(Debug, Default)]
-pub enum Direction {
-    #[default]
-    Ascending,
-    Descending,
-}
-
-#[derive(Debug)]
-pub enum From {
-    Table { name: String, alias: Option<String> },
-    Join { left: Box<From>, right: Box<From>, r#type: JoinType, predicate: Option<Expression> },
 }
 
 /// Expression operators.
@@ -184,13 +233,91 @@ pub enum Operator {
     Like(Box<Expression>, Box<Expression>), // a LIKE b
 }
 
-/// JOIN types.
-#[derive(Debug, PartialEq)]
-pub enum JoinType {
-    Cross,
-    Inner,
-    Left,
-    Right,
+impl Expression {
+    /// Walks the expression tree depth-first, calling a closure for every node.
+    /// Halts and returns false if the closure returns false.
+    pub fn walk(&self, visitor: &mut impl FnMut(&Expression) -> bool) -> bool {
+        use Operator::*;
+
+        if !visitor(self) {
+            return false;
+        }
+
+        match self {
+            Self::Operator(op) => match op {
+                Add(lhs, rhs)
+                | And(lhs, rhs)
+                | Divide(lhs, rhs)
+                | Equal(lhs, rhs)
+                | Exponentiate(lhs, rhs)
+                | GreaterThan(lhs, rhs)
+                | GreaterThanOrEqual(lhs, rhs)
+                | LessThan(lhs, rhs)
+                | LessThanOrEqual(lhs, rhs)
+                | Like(lhs, rhs)
+                | Multiply(lhs, rhs)
+                | NotEqual(lhs, rhs)
+                | Or(lhs, rhs)
+                | Remainder(lhs, rhs)
+                | Subtract(lhs, rhs) => lhs.walk(visitor) && rhs.walk(visitor),
+
+                Factorial(expr) | Identity(expr) | Is(expr, _) | Negate(expr) | Not(expr) => {
+                    expr.walk(visitor)
+                }
+            },
+
+            Self::Function(_, exprs) => exprs.iter().any(|expr| expr.walk(visitor)),
+
+            Self::All | Self::Column(_, _) | Self::Literal(_) => true,
+        }
+    }
+
+    /// Walks the expression tree depth-first while calling a closure until it
+    /// returns true. This is the inverse of walk().
+    pub fn contains(&self, visitor: &impl Fn(&Expression) -> bool) -> bool {
+        !self.walk(&mut |expr| !visitor(expr))
+    }
+
+    /// Find and collects expressions for which the given closure returns true,
+    /// adding them to c. Does not recurse into matching expressions.
+    pub fn collect(&self, visitor: &impl Fn(&Expression) -> bool, exprs: &mut Vec<Expression>) {
+        use Operator::*;
+
+        if visitor(self) {
+            exprs.push(self.clone());
+            return;
+        }
+
+        match self {
+            Self::Operator(op) => match op {
+                Add(lhs, rhs)
+                | And(lhs, rhs)
+                | Divide(lhs, rhs)
+                | Equal(lhs, rhs)
+                | Exponentiate(lhs, rhs)
+                | GreaterThan(lhs, rhs)
+                | GreaterThanOrEqual(lhs, rhs)
+                | LessThan(lhs, rhs)
+                | LessThanOrEqual(lhs, rhs)
+                | Like(lhs, rhs)
+                | Multiply(lhs, rhs)
+                | NotEqual(lhs, rhs)
+                | Or(lhs, rhs)
+                | Remainder(lhs, rhs)
+                | Subtract(lhs, rhs) => {
+                    lhs.collect(visitor, exprs);
+                    rhs.collect(visitor, exprs);
+                }
+                Factorial(expr) | Identity(expr) | Is(expr, _) | Negate(expr) | Not(expr) => {
+                    expr.collect(visitor, exprs);
+                }
+            },
+
+            Self::Function(_, args) => args.iter().for_each(|arg| arg.collect(visitor, exprs)),
+
+            Self::All | Self::Column(_, _) | Self::Literal(_) => {}
+        }
+    }
 }
 
 impl core::convert::From<Literal> for Expression {
@@ -206,7 +333,7 @@ impl core::convert::From<Operator> for Expression {
 }
 
 impl core::convert::From<Operator> for Box<Expression> {
-    fn from(op: Operator) -> Self {
-        Box::new(op.into())
+    fn from(value: Operator) -> Self {
+        Box::new(value.into())
     }
 }
