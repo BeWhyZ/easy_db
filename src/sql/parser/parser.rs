@@ -3,7 +3,7 @@ use std::ops::Add;
 
 use super::{ast, Keyword, Lexer, Token};
 use crate::errinput;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::sql::types::DataType;
 
 pub struct Parser<'a> {
@@ -17,10 +17,9 @@ impl Parser<'_> {
         let mut parser = Self::new(statement);
         let statement = parser.parse_statement()?;
         parser.skip(Token::Semicolon);
-        if let Some(t) = parser.lexer.next().transpose()? {
-            return errinput!("unexpected token: {t}");
+        if let Some(token) = parser.lexer.next().transpose()? {
+            return errinput!("unexpected token {token}");
         }
-
         Ok(statement)
     }
     /// Parses a SQL statement.
@@ -314,7 +313,6 @@ impl Parser<'_> {
 
     fn parse_create_table_column(&mut self) -> Result<ast::Column> {
         let name = self.next_ident()?;
-
         let datatype = match self.next()? {
             Token::Keyword(Keyword::Bool | Keyword::Boolean) => DataType::Boolean,
             Token::Keyword(Keyword::Float | Keyword::Double) => DataType::Float,
@@ -332,7 +330,6 @@ impl Parser<'_> {
             index: false,
             references: None,
         };
-
         while let Some(keyword) = self.next_if_keyword() {
             match keyword {
                 Keyword::Primary => {
@@ -341,19 +338,16 @@ impl Parser<'_> {
                 }
                 Keyword::Null => {
                     if column.nullable.is_some() {
-                        return errinput!("column {} has multiple NULL constraints", column.name);
+                        return errinput!("nullability already set for column {}", column.name);
                     }
-                    column.nullable = Some(true);
+                    column.nullable = Some(true)
                 }
                 Keyword::Not => {
                     self.expect(Keyword::Null.into())?;
                     if column.nullable.is_some() {
-                        return errinput!(
-                            "column {} has multiple NOT NULL constraints",
-                            column.name
-                        );
+                        return errinput!("nullability already set for column {}", column.name);
                     }
-                    column.nullable = Some(false);
+                    column.nullable = Some(false)
                 }
                 Keyword::Default => column.default = Some(self.parse_expression()?),
                 Keyword::Unique => column.unique = true,
@@ -362,14 +356,15 @@ impl Parser<'_> {
                 keyword => return errinput!("unexpected keyword {keyword}"),
             }
         }
-
         Ok(column)
     }
-
     fn parse_expression(&mut self) -> Result<ast::Expression> {
         return self.parse_expression_at(0);
     }
+    /// Parses an expression at the given minimum precedence.
     fn parse_expression_at(&mut self, min_precedence: Precedence) -> Result<ast::Expression> {
+        // If the left-hand side is a prefix operator, recursively parse it and
+        // its operand. Otherwise, parse the left-hand side as an atom.
         let mut lhs = if let Some(prefix) = self.parse_prefix_operator_at(min_precedence) {
             let next_precedence = prefix.precedence() + prefix.associativity();
             let rhs = self.parse_expression_at(next_precedence)?;
@@ -378,6 +373,7 @@ impl Parser<'_> {
             self.parse_expression_atom()?
         };
 
+        // Apply any postfix operators to the left-hand side.
         while let Some(postfix) = self.parse_postfix_operator_at(min_precedence)? {
             lhs = postfix.into_expression(lhs)
         }
@@ -395,6 +391,8 @@ impl Parser<'_> {
             lhs = infix.into_expression(lhs, rhs);
         }
 
+        // Apply any postfix operators after the binary operator. Consider e.g.
+        // 1 + NULL IS NULL.
         while let Some(postfix) = self.parse_postfix_operator_at(min_precedence)? {
             lhs = postfix.into_expression(lhs)
         }
@@ -484,8 +482,11 @@ impl Parser<'_> {
     /// * A parenthesized expression.
     fn parse_expression_atom(&mut self) -> Result<ast::Expression> {
         Ok(match self.next()? {
+            // All columns.
             Token::Asterisk => ast::Expression::All,
-            Token::Number(n) if n.chars().all(|c| c.is_ascii_alphabetic()) => {
+
+            // Literal value.
+            Token::Number(n) if n.chars().all(|c| c.is_ascii_digit()) => {
                 ast::Literal::Integer(n.parse()?).into()
             }
             Token::Number(n) => ast::Literal::Float(n.parse()?).into(),
@@ -496,7 +497,7 @@ impl Parser<'_> {
             Token::Keyword(Keyword::NaN) => ast::Literal::Float(f64::NAN).into(),
             Token::Keyword(Keyword::Null) => ast::Literal::Null.into(),
 
-            // function call
+            // Function call.
             Token::Ident(name) if self.next_is(Token::OpenParen) => {
                 let mut args = Vec::new();
                 while !self.next_is(Token::CloseParen) {
@@ -508,13 +509,13 @@ impl Parser<'_> {
                 ast::Expression::Function(name, args)
             }
 
-            // column name, either qualified as table.column or unqualified.
+            // Column name, either qualified as table.column or unqualified.
             Token::Ident(table) if self.next_is(Token::Period) => {
                 ast::Expression::Column(Some(table), self.next_ident()?)
             }
             Token::Ident(column) => ast::Expression::Column(None, column),
 
-            // parenthesized expression.
+            // Parenthesized expression.
             Token::OpenParen => {
                 let expr = self.parse_expression()?;
                 self.expect(Token::CloseParen)?;
@@ -533,15 +534,6 @@ impl Parser<'_> {
             Token::Ident(indent) => Ok(indent),
             token => errinput!("unexpected token {token}"),
         }
-    }
-
-    fn pare_explain(&mut self) -> Result<ast::Statement> {
-        self.expect(Keyword::Explain.into())?;
-
-        if self.next_is(Keyword::Explain.into()) {
-            return errinput!("nested EXPLAIN statements are not supported");
-        }
-        Ok(ast::Statement::Explain(Box::new(self.parse_statement()?)))
     }
 
     fn parse_rollback(&mut self) -> Result<ast::Statement> {
@@ -594,7 +586,7 @@ impl Parser<'_> {
 
     /// Consumes the next lexer token if it is the given token, returning true.
     fn next_is(&mut self, token: Token) -> bool {
-        self.next_if(|t| *t == token).is_some()
+        self.next_if(|t| t == &token).is_some()
     }
 
     /// Returns the next lexer token if it satisfies the predicate.
@@ -604,7 +596,7 @@ impl Parser<'_> {
     }
     /// Fetches the next lexer token, or errors if none is found.
     fn next(&mut self) -> Result<Token> {
-        self.lexer.next().transpose()?.ok_or_else(|| errinput!("Unexpected end of input"))
+        self.lexer.next().transpose()?.ok_or_else(|| errinput!("unexpected end of input"))
     }
 
     /// Peeks the next lexer token if any, but transposes it for convenience.
